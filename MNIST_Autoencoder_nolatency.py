@@ -8,9 +8,10 @@ Created on Mon Jul  6 15:25:12 2020
 
 
 # begin by importing our dependencies.
+import os
 import matplotlib.pyplot as plt
 import numpy as np
-
+import pickle
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -33,10 +34,24 @@ lr = 1e-4
 
 
 # use gpu if available
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+
+
+# encoding (analog to spiking) layer
+class SpikeEncoder(nn.Identity):
+    def __init__(self, num_features):
+        super().__init__(num_features)        
+        self.totals = torch.zeros((1,num_features), device=DEVICE)
+
+    def reset_totals(self):
+        self.totals.fill_(0.0)
+
+
+
 
 # spiking linear layer
-class SLinear(nn.Linear):
+class SpikeLinear(nn.Linear):
     def __init__(self, in_features, out_features):
         super().__init__(in_features=in_features, out_features=out_features)        
         # There is duplication of output/inputs bwtween layers, but
@@ -46,7 +61,13 @@ class SLinear(nn.Linear):
         self.in_bins = []
         self.out_memory = []        
         self.out_bins = []        
+        self.totals = torch.zeros((1,out_features), device=DEVICE)
 
+        
+    def reset_totals(self):
+        self.totals = self.state_dict()['bias'].clone().detach()
+        
+        
     def save_memory(self, x):
         """ This is an alternative execute function that also records input and output
         activation functions.  This is required to chose a discritization for spking.
@@ -78,7 +99,7 @@ class SLinear(nn.Linear):
         of spikes, uses idx to figure out which list of bins to use
         """
         spikes = np.digitize(values.cpu(), self.in_bins)-1
-        return torch.from_numpy(spikes).to(device)
+        return torch.from_numpy(spikes).to(DEVICE)
 
     def reconstruct(self, output_spikes):
         return output_spikes*(self.out_bins[1]-self.out_bins[0])
@@ -94,17 +115,17 @@ class AE(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
 
-        self.encoder_hidden_layer = SLinear(in_features=kwargs["input_shape"], 
-                                              out_features=hidden_neurons)
+        self.encoder_hidden_layer = SpikeLinear(in_features=kwargs["input_shape"], 
+                                                out_features=hidden_neurons)
         
-        self.encoder_output_layer = SLinear(in_features=hidden_neurons, 
-                                              out_features=hidden_neurons)
+        self.encoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=hidden_neurons)
         
-        self.decoder_hidden_layer = SLinear(in_features=hidden_neurons, 
-                                              out_features=hidden_neurons)
+        self.decoder_hidden_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=hidden_neurons)
         
-        self.decoder_output_layer = SLinear(in_features=hidden_neurons, 
-                                              out_features=kwargs["input_shape"])
+        self.decoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=kwargs["input_shape"])
         
 
     '''
@@ -143,15 +164,6 @@ class AE(nn.Module):
         #self.memory[4].append(reconstructed.cpu().numpy())
         
     '''
-    grabs the weights from the layers to be saved out to a file
-    '''
-    def get_weights(self):
-        return [self.encoder_hidden_layer.weight.cpu().detach().numpy(),
-                self.encoder_output_layer.weight.cpu().detach().numpy(),
-                self.decoder_hidden_layer.weight.cpu().detach().numpy(),
-                self.decoder_output_layer.weight.cpu().detach().numpy()]
-    
-    '''
     uses the the memory in order to create a list of bins for the spiking
     network to use for discretization purposes
     '''
@@ -168,53 +180,44 @@ class AE_spikes(nn.Module):
     kwargs of input_shape ~ use to tell the shape of the mnist image
            of pretrained_model ~ use to recreate the weights exactly
     creates four layers, two for the encoder and two for the decoder, also 
-    creates a totals array to hold the voltage of the neurons for each layer
     '''
     def __init__(self, **kwargs):
         super().__init__()
-        self.totals = []
         self.layers = []
         
         # make the layers
-        self.encoder_hidden_layer = SLinear(in_features=kwargs["input_shape"], 
-                                            out_features=hidden_neurons)
+        self.encoder_input_layer = SpikeEncoder(num_features=kwargs["input_shape"])
+
+        self.encoder_hidden_layer = SpikeLinear(in_features=kwargs["input_shape"], 
+                                                out_features=hidden_neurons)
         
-        self.encoder_output_layer = SLinear(in_features=hidden_neurons, 
-                                            out_features=hidden_neurons)
+        self.encoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=hidden_neurons)
         
-        self.decoder_hidden_layer = SLinear(in_features=hidden_neurons, 
-                                            out_features=hidden_neurons)
+        self.decoder_hidden_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=hidden_neurons)
         
-        self.decoder_output_layer = SLinear(in_features=hidden_neurons, 
-                                            out_features=kwargs["input_shape"])  
+        self.decoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
+                                                out_features=kwargs["input_shape"])  
         
         pretrained_model = kwargs["pretrained_model"]
         self.copy(pretrained_model)
         
-        # now append all the layers to a list and make totals for them
+        # now append all the layers to a list.
+        self.layers.append(self.encoder_input_layer)
         self.layers.append(self.encoder_hidden_layer)
-        self.totals.append(torch.zeros((1,hidden_neurons), device=device))
-        
         self.layers.append(self.encoder_output_layer)
-        self.totals.append(torch.zeros((1,hidden_neurons), device=device))
-        
         self.layers.append(self.decoder_hidden_layer)
-        self.totals.append(torch.zeros((1,hidden_neurons), device=device))
-        
         self.layers.append(self.decoder_output_layer)
-        self.totals.append(torch.zeros((1,kwargs["input_shape"]), device=device))
-    
-        
-        self.create_input_totals = torch.zeros((1,kwargs["input_shape"]), device=device)
-        
-        self.totals = np.array(self.totals)
         
         self.set_up_weights()
         
 
     def copy(self, in_model):
         """ Convert might be a better name.
+        Custom for the autoencoder, but will be made general in the future.
         """
+        # source net does not have an encoder_input_layer.
         self.encoder_hidden_layer.copy(in_model.encoder_hidden_layer)
         self.encoder_output_layer.copy(in_model.encoder_output_layer)
         self.decoder_hidden_layer.copy(in_model.decoder_hidden_layer)
@@ -223,29 +226,34 @@ class AE_spikes(nn.Module):
         
     def set_up_weights(self):
         for layer in self.layers:
-            # calculate how much voltage each spike causes in the neuron
-            spike_height = layer.in_bins[1]-layer.in_bins[0]
-            # multiply that into the weights
-            layer.state_dict()['weight'] *= spike_height
-            layer.state_dict()['bias'] *= spike_height
+            if isinstance(layer, SpikeLinear):
+                # calculate how much voltage each spike causes in the neuron
+                spike_height = layer.in_bins[1]-layer.in_bins[0]
+                # multiply that into the weights
+                layer.state_dict()['weight'] *= spike_height
+                layer.state_dict()['bias'] *= spike_height
             
-            # now do the same except for the output spike height
-            spike_height = layer.out_bins[1]-layer.out_bins[0]
-            # divide that into the weights
-            layer.state_dict()['weight'] /= spike_height
-            layer.state_dict()['bias'] /= spike_height
+                # now do the same except for the output spike height
+                spike_height = layer.out_bins[1]-layer.out_bins[0]
+                # divide that into the weights
+                layer.state_dict()['weight'] /= spike_height
+                layer.state_dict()['bias'] /= spike_height
         
 
     '''
     uses a list of input spikes to calculate the output values of a layer
     the number in self.bits is the latency, max times the neuron will loop
     '''
-    def process_layer(self, layer_num, input_spikes):
+    def process_layer(self, layer_idx, input_spikes):
         # get the totals for this layer
-        totals = self.totals[layer_num]
+        totals = self.layers[layer_idx].totals
 
         # create the voltages in the cell from spikes
-        total = self.layers[layer_num].state_dict()['weight'].clone().detach()*(input_spikes)
+        try:
+            total = self.layers[layer_idx].state_dict()['weight'].clone().detach()*(input_spikes)
+        except:
+            ipdb.set_trace()
+            pass
         totals += torch.sum(total,axis=1)
         
         # convert the voltage in the cell to spikes for output
@@ -256,12 +264,11 @@ class AE_spikes(nn.Module):
         # if neuron has spiked, subtract that from cell voltage
         totals[output == 1] -= 1
         
-        
         return output 
     
     def process_first_layer(self, activations):
         # get the totals for this layer
-        totals = self.create_input_totals
+        totals = self.layers[0].totals
         
         # add the input volatges to the totals
         totals += activations
@@ -281,9 +288,10 @@ class AE_spikes(nn.Module):
     resets the totals to zero so that a new image can be processed
     '''
     def reset_totals(self):
-        for idx in range(len(self.totals)):
-            self.totals[idx] = self.layers[idx].state_dict()['bias'].clone().detach()
+        for layer in self.layers:
+            layer.reset_totals()
 
+            
     '''
     a method updated from the super class, runs input through all the layers
     '''
@@ -297,15 +305,16 @@ class AE_spikes(nn.Module):
             # TODO: Try to get rid of this call.
             input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
 
-            output_spikes = torch.zeros(in_shape).to(device)
+            output_spikes = torch.zeros(in_shape).to(DEVICE)
             
             # loop through every layer until we've finished processing the spikes
             for i in range(16):
+                # TODO:  Make the first layer process like all others. (generalize)
                 input_spikes = self.process_first_layer(input_activation)
-                spike_layer1 = self.process_layer(0,input_spikes)
-                spike_layer2 = self.process_layer(1,spike_layer1)
-                spike_layer3 = self.process_layer(2,spike_layer2)
-                output_spikes += self.process_layer(3,spike_layer3)
+                spike_layer1 = self.process_layer(1,input_spikes)
+                spike_layer2 = self.process_layer(2,spike_layer1)
+                spike_layer3 = self.process_layer(3,spike_layer2)
+                output_spikes += self.process_layer(4,spike_layer3)
 
             # convert the output spikes to voltages
             reconstructed = self.decoder_output_layer.reconstruct(output_spikes)
@@ -314,7 +323,7 @@ class AE_spikes(nn.Module):
             
         return reconstructions
     
-    def forward_learn(self, features, layer):
+    def forward_learn(self, features, layer_idx, teacher):
         reconstructions = []
 
         # loop through every image in the batch
@@ -324,24 +333,24 @@ class AE_spikes(nn.Module):
             # divide input into 16
             input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
 
-            output_spikes = torch.zeros(in_shape).to(device)
+            output_spikes = torch.zeros(in_shape).to(DEVICE)
             
             # create tensors that hold the spikes for learning later
             spike_frequencies = []
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(device))
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(device))
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(device))
-            spike_frequencies.append(torch.zeros(in_shape).to(device))
+            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
+            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
+            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
+            spike_frequencies.append(torch.zeros(in_shape).to(DEVICE))
             # loop through every layer until we've finished processing the spikes
             for i in range(16):
                 input_spikes = self.process_first_layer(input_activation)
-                spike_layer1 = self.process_layer(0,input_spikes)
+                spike_layer1 = self.process_layer(1,input_spikes)
                 spike_frequencies[0] += spike_layer1
-                spike_layer2 = self.process_layer(1,spike_layer1)
+                spike_layer2 = self.process_layer(2,spike_layer1)
                 spike_frequencies[1] += spike_layer2
-                spike_layer3 = self.process_layer(2,spike_layer2)
+                spike_layer3 = self.process_layer(3,spike_layer2)
                 spike_frequencies[2] += spike_layer3
-                output_spikes += self.process_layer(3,spike_layer3)
+                output_spikes += self.process_layer(4,spike_layer3)
             
             spike_frequencies[3] += output_spikes
 
@@ -351,36 +360,38 @@ class AE_spikes(nn.Module):
             
             # get the outputs from the original network for our truth
             og_layers = []
-            og_layers.append(torch.relu(model.encoder_hidden_layer(feature)))
-            og_layers.append(torch.relu(model.encoder_output_layer(og_layers[0])))
-            og_layers.append(torch.relu(model.decoder_hidden_layer(og_layers[1])))
-            og_layers.append(torch.relu(model.decoder_output_layer(og_layers[2])))
+            og_layers.append(torch.relu(teacher.encoder_hidden_layer(feature)))
+            og_layers.append(torch.relu(teacher.encoder_output_layer(og_layers[0])))
+            og_layers.append(torch.relu(teacher.decoder_hidden_layer(og_layers[1])))
+            og_layers.append(torch.relu(teacher.decoder_output_layer(og_layers[2])))
 
             # change to frequencies by using max bin
-            og_layers[0] /= self.layers[0].out_bins[-1]
-            og_layers[1] /= self.layers[1].out_bins[-1]
-            og_layers[2] /= self.layers[2].out_bins[-1]
-            og_layers[3] /= self.layers[3].out_bins[-1]
+            # Skip the spike enocder layer.  TODO: See if we can generalize.
+            og_layers[0] /= self.layers[1].out_bins[-1]
+            og_layers[1] /= self.layers[2].out_bins[-1]
+            og_layers[2] /= self.layers[3].out_bins[-1]
+            og_layers[3] /= self.layers[4].out_bins[-1]
             
             # now we have to use the spike frequencies and og layer outputs to learn            
-            if layer == 0:
+            if layer_idx == 0:
                 self.encoder_hidden_layer.weight += ((input_activation * 16) *\
                     torch.reshape((og_layers[0]-spike_frequencies[0]),[128,1])) * lr
                     
-                self.encoder_hidden_layer.weight += (torch.ones(input_activation.shape).to(device) *\
+                self.encoder_hidden_layer.weight += (torch.ones(input_activation.shape).to(DEVICE) *\
                     torch.reshape((og_layers[0]-spike_frequencies[0]),[128,1])) * lr
                     
             else:
-                self.layers[layer].weight += ((spike_frequencies[layer-1] * 16) *\
-                    torch.reshape((og_layers[layer]-spike_frequencies[layer]),\
-                                  [len(og_layers[layer]),1])) * lr
+                # +1 is to skip the spike enocder
+                self.layers[layer_idx+1].weight += ((spike_frequencies[layer_idx-1] * 16) *\
+                    torch.reshape((og_layers[layer_idx]-spike_frequencies[layer_idx]),\
+                                  [len(og_layers[layer_idx]),1])) * lr
                     
-                self.layers[layer].weight += (torch.ones(spike_frequencies[layer-1].shape).to(device) *\
-                    torch.reshape((og_layers[layer]-spike_frequencies[layer]),\
-                                  [len(og_layers[layer]),1])) * lr
+                self.layers[layer_idx+1].weight += (torch.ones(spike_frequencies[layer_idx-1].shape).to(DEVICE) *\
+                    torch.reshape((og_layers[layer_idx]-spike_frequencies[layer_idx]),\
+                                  [len(og_layers[layer_idx]),1])) * lr
             
             # convert the output spikes to voltages
-            reconstructed = self.layers[3].reconstruct(output_spikes)
+            reconstructed = self.layers[4].reconstruct(output_spikes)
             # add the reconstructed image to the list
             reconstructions.append(reconstructed)
             
@@ -426,7 +437,7 @@ def train_autoencoder(model, train_loader):
         for batch_features, _ in train_loader:
             # reshape mini-batch data to [N, in_shape] matrix
             # load it to the active device
-            batch_features = batch_features.view(-1, in_shape).to(device)
+            batch_features = batch_features.view(-1, in_shape).to(DEVICE)
             
             # reset the gradients back to zero
             # PyTorch accumulates gradients on subsequent backward passes
@@ -454,14 +465,7 @@ def train_autoencoder(model, train_loader):
         print("epoch : {}/{}, recon loss = {:.8f}".format(epoch + 1, epochs, loss))
 
 
-def save_weights(model):
-    np.save('weights_autoencoder',model.get_weights())
-    return np.array(model.get_weights())
-
-def load_weights():
-    return np.load('weights_autoencoder.npy',allow_pickle=True)
-
-def reconstruct_test_images(model, test_loader):
+def reconstruct_test_images(model, test_loader, show=True):
     test_examples = None
 
     # create the reconstructions using the model
@@ -469,29 +473,36 @@ def reconstruct_test_images(model, test_loader):
         for batch_features in test_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, in_shape)
-            reconstruction = model(test_examples.to(device))
+            reconstruction = model(test_examples.to(DEVICE))
             break
     
     # reconstruct some test images using trained autoencoder
+    results = []
     with torch.no_grad():
         number = 10
         plt.figure(figsize=(20, 4))
         for index in range(number):
-            # display original
-            ax = plt.subplot(2, number, index + 1)
-            plt.imshow(test_examples[index].numpy().reshape(28, 28))
-            plt.gray()
-            ax.get_xaxis().set_visible(False)
-            ax.get_yaxis().set_visible(False)
+            out_img = reconstruction[index].cpu().numpy().reshape(28, 28)
+            if show:
+                # display original
+                ax = plt.subplot(2, number, index + 1)
+                plt.imshow(test_examples[index].numpy().reshape(28, 28))
+                plt.gray()
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
     
-            # display reconstruction
-            ax = plt.subplot(2, number, index + 1 + number)
-            plt.imshow(reconstruction[index].cpu().numpy().reshape(28, 28))
-            plt.gray()
-            ax.get_xaxis().set_visible(False)
-            ax.get_yaxis().set_visible(False)
-        plt.show()
-        
+                # display reconstruction
+                ax = plt.subplot(2, number, index + 1 + number)
+                results.append(out_img)
+                plt.imshow(out_img)
+                plt.gray()
+                ax.get_xaxis().set_visible(False)
+                ax.get_yaxis().set_visible(False)
+        if show:
+            plt.show()
+
+    return np.array(results)
+
 
 def compute_mMSE(model, test_loader):
     test_examples = None
@@ -501,7 +512,7 @@ def compute_mMSE(model, test_loader):
         for batch_features in test_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, in_shape)
-            reconstruction = model(test_examples.to(device))
+            reconstruction = model(test_examples.to(DEVICE))
             break
     
     
@@ -524,7 +535,7 @@ def compute_mMSE(model, test_loader):
         return np.mean(np.array(mMSE))
 
 
-def train_spikingnet(model, train_loader, layer):
+def train_spikingnet(model, teacher, train_loader, layer_idx):
     test_examples = None
 
     # create the reconstructions using the model
@@ -532,7 +543,7 @@ def train_spikingnet(model, train_loader, layer):
         for batch_features in train_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, in_shape)
-            model.forward_learn(test_examples.to(device),layer)
+            model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
             break
     
 
@@ -552,78 +563,132 @@ def compute_bins(model, test_loader, bits):
         for batch_features in test_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, in_shape)
-            model.save_memory(test_examples.to(device))
+            model.save_memory(test_examples.to(DEVICE))
             break
         
     model.create_bins(bits)
     
         
+def test_mnist_autoencoder(show=True):
+    results = {}
+    train_loader, test_loader = load_mnist()
 
-train_loader, test_loader = load_mnist()
+    # check if we've already trained this up
+    model = AE(input_shape=784).to(DEVICE)
 
-# check if we've already trained this up
-model = AE(input_shape=784).to(device)
-try:
-    with open('AEmodel.pth', 'rb') as config_dictionary_file:    
-        model.load_state_dict(torch.load('AEmodel.pth',
+    if os.path.isfile('test_data/mnist_autoencoder.pth'):
+        model.load_state_dict(torch.load('test_data/mnist_autoencoder.pth',
                                          map_location=lambda storage, loc: storage))
+    else:
+        # create a model from `AE` autoencoder class and load it to gpu    
+        # train it
+        train_autoencoder(model, train_loader)
+        # save the model
+        torch.save(model.state_dict(), 'test_data/mnist_autoencoder.pth')
 
-except:
-    # create a model from `AE` autoencoder class and load it to gpu    
-    # train it
-    train_autoencoder(model, train_loader)
+    # compute the mse of the original continuous network
+    results['mMSE_AE'] = compute_mMSE(model, test_loader)
+    print("Mean Squared Error of OG Model:")
+    print(results['mMSE_AE'])
 
-    # save the model
-    torch.save(model.state_dict(), 'AEmodel.pth')
+    # Convert the continuous network to a spiking network
+    # for now a bit depth of 16
+    bits = 16
+    # get some bins for discretization purposes
+    compute_bins(model, test_loader, bits)
+
+    # create a spiking model
+    spiking_model = AE_spikes(input_shape=in_shape,
+                              pretrained_model=model).to(DEVICE)
+
+    # compute the mse of the spiking model
+    results['mMSE_AE_spikes'] = compute_mMSE(spiking_model, test_loader)
+    print("Mean Squared Error of Spiking Model:")
+    print(results['mMSE_AE_spikes'])
+
+    numpy_results = []
+    
+    results['continuous_reconstruction'] = reconstruct_test_images(model, test_loader, show)
+    results['spiking_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
+
+    # Tune/train the spiking network
+    for i in range(5):
+        print("Epoch %d"%(i+1))
+        for layer_idx in range(4):
+            print("Layer %d"%(layer_idx+1))
+            train_spikingnet(spiking_model, model, train_loader, layer_idx)
+            mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader)
+            print(mMSE_AE_spikes_train)
+    results['mMSE_AE_spikes_train'] = mMSE_AE_spikes_train
+    print(results['mMSE_AE_spikes_train'])
+
+    results['tuned_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
+
+    truth = load_truth("test_data/mnist_autoencoder")
+    if truth is None:
+        save_truth(results, "test_data/mnist_autoencoder")
+        return
+
+    return compare_results_with_truth(results, truth)
 
 
-# compute the mse
-mMSE_AE = compute_mMSE(model, test_loader)
+
+def compare_results_with_truth(results, truth):
+    """ results and truth are both dictionaries witht he same keys.
+    Values should be the same for the test to pass.
+    """
+    success = True
+    for key in truth.keys():
+        if not key in results:
+            print(f"Failed: {key} missing from results");
+            success = False
+            continue
+        if type(truth[key]) != type(results[key]):
+            print(f"Failed: {key} type mismatch, {type(results[key])} != {type(truth[key])}");
+            success = False
+            continue
+        if isinstance(truth[key], float):
+            # Do we need an epsilon/fuzzy comparison?
+            if truth[key] != results[key]:
+                print(f"Failed: {key} value mismatch, {results[key]} != {truth[key]}")
+                success = False
+            continue
+        if isinstance(truth[key], (np.ndarray, np.generic)):
+            # Do we need an epsilon/fuzzy comparison?
+            if not np.array_equal(truth[key], results[key]):
+                print(f"Failed: {key} array mismatch")
+                success = False
+            continue
+    return success
 
 
-# for now a bit depth of 16
-bits = 16
-# get some bins for discretization purposes
-compute_bins(model, test_loader, bits)
+def load_truth(rootpath):
+    """ Just use pickle for now. (even though it is no secure).
+    rootpath:  filepath without an extension.
+    """
+    try:
+        filepath = f"{rootpath}.pkl"
+        with open(filepath, 'rb') as fp:
+            return pickle.load(fp)
+    except:
+        print("Error loading truth.")
+        return None
 
-# create a spiking model
-spiking_model = AE_spikes(input_shape=in_shape,
-                          pretrained_model=model).to(device)
-
-
-# compute the mse of the spiking model
-mMSE_AE_spikes = compute_mMSE(spiking_model, test_loader)
-
-reconstruct_test_images(model, test_loader)
-reconstruct_test_images(spiking_model, test_loader)
-
-
-
-print("Mean Squared Error of OG Model:")
-print(mMSE_AE)
-
-print("Mean Squared Error of Spiking Model:")
-print(mMSE_AE_spikes)
-
-
-
-
-
-for i in range(5):
-    print("Epoch %d"%(i+1))
-    for layer in range(4):
-        print("Layer %d"%(layer+1))
-        train_spikingnet(spiking_model, train_loader, layer)
-        mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader)
-
-        print(mMSE_AE_spikes_train)
+            
+def save_truth(results, rootpath):
+    """ Just use pickle for now. (even though it is no secure).
+    result: dictionary of values (including numpy arrays).
+    rootpath:  filepath without an extension.
+    """
+    filepath = f"{rootpath}.pkl"
+    with open(filepath, 'wb') as fp:
+        pickle.dump(results, fp)
     
 
 
 
-
-reconstruct_test_images(spiking_model, test_loader)
-
+if test_mnist_autoencoder(show=False):
+    print("mnist autoencoder test passed")
 
 
 """
@@ -636,7 +701,7 @@ for bit_depth in range(2,64):
 
     # create a spiking model
     spiking_model = AE_spikes(bits=bits,bins=bins,input_shape=in_shape,
-                              pretrained_model=model).to(device)
+                              pretrained_model=model).to(DEVICE)
     
     
     # compute the mse of the spiking model

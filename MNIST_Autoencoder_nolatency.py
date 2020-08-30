@@ -520,29 +520,24 @@ def compute_bins(model, test_loader, bits):
         
     return model.create_bins(bits)
     
-# saves out any object to a file
-def save_object(obj, filename):
-    with open(filename, 'wb') as output:  # Overwrites any existing file.
-        pickle.dump(obj, output, pickle.HIGHEST_PROTOCOL)
         
 
 train_loader, test_loader = load_mnist()
 
 # check if we've already trained this up
+model = AE(input_shape=784).to(device)
 try:
-    with open('AEmodel.pkl', 'rb') as config_dictionary_file:
-    
-        model = pickle.load(config_dictionary_file)
+    with open('AEmodel.pth', 'rb') as config_dictionary_file:    
+        model.load_state_dict(torch.load('AEmodel.pth',
+                                         map_location=lambda storage, loc: storage))
 
 except:
-    # create a model from `AE` autoencoder class and load it to gpu
-    model = AE(input_shape=in_shape).to(device)
-    
+    # create a model from `AE` autoencoder class and load it to gpu    
     # train it
     train_autoencoder(model, train_loader)
-    
+
     # save the model
-    save_object(model, 'AEmodel.pkl')
+    torch.save(model.state_dict(), 'AEmodel.pth')
 
 
 # compute the mse

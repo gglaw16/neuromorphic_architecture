@@ -37,6 +37,13 @@ lr = 1e-4
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
+# spiking linear layer
+class SLinear(nn.Linear):
+    def __init__(self, in_features, out_features):
+        super().__init__(in_features=in_features, out_features=out_features)        
+        self.memory = []
+        #self.bins = bins
+
 
 # autoencoder class with fully connected layers for both encoder and decoder
 class AE(nn.Module):
@@ -46,16 +53,16 @@ class AE(nn.Module):
     '''
     def __init__(self, **kwargs):
         super().__init__()
-        self.encoder_hidden_layer = nn.Linear(in_features=kwargs["input_shape"], 
+        self.encoder_hidden_layer = SLinear(in_features=kwargs["input_shape"], 
                                               out_features=hidden_neurons)
         
-        self.encoder_output_layer = nn.Linear(in_features=hidden_neurons, 
+        self.encoder_output_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=hidden_neurons)
         
-        self.decoder_hidden_layer = nn.Linear(in_features=hidden_neurons, 
+        self.decoder_hidden_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=hidden_neurons)
         
-        self.decoder_output_layer = nn.Linear(in_features=hidden_neurons, 
+        self.decoder_output_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=kwargs["input_shape"])
         
         self.memory = [[],[],[],[],[]]
@@ -136,16 +143,16 @@ class AE_spikes(nn.Module):
         self.bins = kwargs["bins"]
         
         # make the layers
-        self.encoder_hidden_layer = nn.Linear(in_features=kwargs["input_shape"], 
+        self.encoder_hidden_layer = SLinear(in_features=kwargs["input_shape"], 
                                               out_features=hidden_neurons)
         
-        self.encoder_output_layer = nn.Linear(in_features=hidden_neurons, 
+        self.encoder_output_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=hidden_neurons)
         
-        self.decoder_hidden_layer = nn.Linear(in_features=hidden_neurons, 
+        self.decoder_hidden_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=hidden_neurons)
         
-        self.decoder_output_layer = nn.Linear(in_features=hidden_neurons, 
+        self.decoder_output_layer = SLinear(in_features=hidden_neurons, 
                                               out_features=kwargs["input_shape"])  
         
         self.load_state_dict(kwargs["pretrained_model"].state_dict())

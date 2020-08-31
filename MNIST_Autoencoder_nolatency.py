@@ -42,10 +42,39 @@ DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 class SpikeEncoder(nn.Identity):
     def __init__(self, num_features):
         super().__init__(num_features)        
-        self.totals = torch.zeros((1,num_features), device=DEVICE)
+        self.potentials = torch.zeros((1,num_features), device=DEVICE)
+        self.spike_counts = torch.zeros(num_features).to(DEVICE)
 
-    def reset_totals(self):
-        self.totals.fill_(0.0)
+    def get_spike_frequencies(self):
+        return self.spike_counts / self.frequency_duration
+
+    def reset(self):
+        """ Reset membrane potential and counts to start computing spikes and frequency a new.
+        """
+        self.potentials.fill_(0.0)
+        self.spike_counts.fill_(0.0)
+        self.frequency_duration = 0
+        
+    def process(self, activations):
+        """ Activations are continuous values, returns output spikes (binary values).
+        """
+        # get the potentials for this layer
+        potentials = self.potentials
+        # add the input currents to the membrane potentials (capacitence)
+        potentials += activations
+        # convert the voltage in the cell to spikes
+        output = potentials.clone().detach()
+        output[output > 1] = 1
+        output[output < 1] = 0
+        # if the neuron spikes, subtract 1 from potentials
+        potentials[output > 0] -= 1
+
+        # For learning.
+        self.spike_counts += output.sum(axis=0)
+        self.frequency_duration += 1
+        
+        return output
+    
 
 
 
@@ -61,11 +90,52 @@ class SpikeLinear(nn.Linear):
         self.in_bins = []
         self.out_memory = []        
         self.out_bins = []        
-        self.totals = torch.zeros((1,out_features), device=DEVICE)
+        self.potentials = torch.zeros((1,out_features), device=DEVICE)
+        self.spike_counts = torch.zeros(out_features).to(DEVICE)
+        self.frequency_duration = 0
 
         
-    def reset_totals(self):
-        self.totals = self.state_dict()['bias'].clone().detach()
+    # TODO: Overwrite superclass execute layer method
+    def process(self, input_spikes):
+        """ Uses a list of input spikes to calculate the output values of a layer.
+        """
+        # get the potentials for this layer
+        potentials = self.potentials
+
+        # create the voltages in the cell from input spikes (currents)
+        total = self.state_dict()['weight'].clone().detach()*(input_spikes)
+        potentials += torch.sum(total,axis=1)
+        
+        # convert the voltage in the cell to spikes for output
+        output = potentials.clone().detach()
+        output[output > 1] = 1
+        output[output < 1] = 0
+        
+        # if neuron has spiked, subtract that from cell voltage
+        potentials[output == 1] -= 1
+        
+        # For learning.
+        self.spike_counts += output
+        self.frequency_duration += 1
+
+        return output 
+
+
+    def get_spike_frequencies(self):
+        return self.spike_counts / self.frequency_duration
+
+    
+    # TODO: Try to get rid of this.
+    def get_spike_counts(self):
+        return self.spike_counts
+    
+                
+    def reset(self):
+        """ Reset membrane potential and counts to start computing spikes and frequency a new.
+        """
+        self.potentials = self.state_dict()['bias'].clone().detach()
+        self.spike_counts.fill_(0.0)
+        self.frequency_duration = 0
         
         
     def save_memory(self, x):
@@ -245,8 +315,8 @@ class AE_spikes(nn.Module):
     the number in self.bits is the latency, max times the neuron will loop
     '''
     def process_layer(self, layer_idx, input_spikes):
-        # get the totals for this layer
-        totals = self.layers[layer_idx].totals
+        # get the potentials for this layer
+        potentials = self.layers[layer_idx].potentials
 
         # create the voltages in the cell from spikes
         try:
@@ -254,42 +324,42 @@ class AE_spikes(nn.Module):
         except:
             ipdb.set_trace()
             pass
-        totals += torch.sum(total,axis=1)
+        potentials += torch.sum(total,axis=1)
         
         # convert the voltage in the cell to spikes for output
-        output = totals.clone().detach()
+        output = potentials.clone().detach()
         output[output > 1] = 1
         output[output < 1] = 0
         
         # if neuron has spiked, subtract that from cell voltage
-        totals[output == 1] -= 1
+        potentials[output == 1] -= 1
         
         return output 
     
     def process_first_layer(self, activations):
-        # get the totals for this layer
-        totals = self.layers[0].totals
+        # get the potentials for this layer
+        potentials = self.layers[0].potentials
         
-        # add the input volatges to the totals
-        totals += activations
+        # add the input volatges to the potentials
+        potentials += activations
 
         # convert the voltage in the cell to spikes
-        output = totals.clone().detach()
+        output = potentials.clone().detach()
         output[output > 1] = 1
         output[output < 1] = 0
 
-        # if the neuron spikes, subtract 1 from totals
-        totals[output > 0] -= 1
+        # if the neuron spikes, subtract 1 from potentials
+        potentials[output > 0] -= 1
         
         return output
     
 
     '''
-    resets the totals to zero so that a new image can be processed
+    resets the potentials to zero so that a new image can be processed
     '''
-    def reset_totals(self):
+    def reset(self):
         for layer in self.layers:
-            layer.reset_totals()
+            layer.reset()
 
             
     '''
@@ -299,8 +369,8 @@ class AE_spikes(nn.Module):
         reconstructions = []
         # loop through every image in the batch
         for feature in features:
-            # reset the totals to zero
-            self.reset_totals()
+            # reset the potentials to zero
+            self.reset()
             # divide input into 15
             # TODO: Try to get rid of this call.
             input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
@@ -309,13 +379,11 @@ class AE_spikes(nn.Module):
             
             # loop through every layer until we've finished processing the spikes
             for i in range(16):
-                # TODO:  Make the first layer process like all others. (generalize)
-                input_spikes = self.process_first_layer(input_activation)
-                spike_layer1 = self.process_layer(1,input_spikes)
-                spike_layer2 = self.process_layer(2,spike_layer1)
-                spike_layer3 = self.process_layer(3,spike_layer2)
-                output_spikes += self.process_layer(4,spike_layer3)
-
+                x = input_activation
+                for layer in self.layers:
+                    x = layer.process(x)
+                output_spikes += x
+                
             # convert the output spikes to voltages
             reconstructed = self.decoder_output_layer.reconstruct(output_spikes)
             # add the reconstructed image to the list
@@ -328,36 +396,28 @@ class AE_spikes(nn.Module):
 
         # loop through every image in the batch
         for feature in features:
-            # reset the totals to zero
-            self.reset_totals()
+            # reset the potentials to zero
+            self.reset()
             # divide input into 16
             input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
 
-            output_spikes = torch.zeros(in_shape).to(DEVICE)
-            
-            # create tensors that hold the spikes for learning later
-            spike_frequencies = []
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
-            spike_frequencies.append(torch.zeros(hidden_neurons).to(DEVICE))
-            spike_frequencies.append(torch.zeros(in_shape).to(DEVICE))
             # loop through every layer until we've finished processing the spikes
             for i in range(16):
-                input_spikes = self.process_first_layer(input_activation)
-                spike_layer1 = self.process_layer(1,input_spikes)
-                spike_frequencies[0] += spike_layer1
-                spike_layer2 = self.process_layer(2,spike_layer1)
-                spike_frequencies[1] += spike_layer2
-                spike_layer3 = self.process_layer(3,spike_layer2)
-                spike_frequencies[2] += spike_layer3
-                output_spikes += self.process_layer(4,spike_layer3)
-            
-            spike_frequencies[3] += output_spikes
+                x = input_activation
+                for layer in self.layers:
+                    x = layer.process(x)
 
-            # change the spikes to frequencies
-            for spike_frequency in spike_frequencies:
-                spike_frequency /= 16.0
-            
+            # spike count of output layer.
+            output_spikes = self.layers[-1].get_spike_counts()
+
+            spike_frequencies = []
+            spike_frequencies.append(self.layers[1].get_spike_frequencies())
+            spike_frequencies.append(self.layers[2].get_spike_frequencies())
+            spike_frequencies.append(self.layers[3].get_spike_frequencies())
+            spike_frequencies.append(self.layers[4].get_spike_frequencies())
+
+
+
             # get the outputs from the original network for our truth
             og_layers = []
             og_layers.append(torch.relu(teacher.encoder_hidden_layer(feature)))
@@ -396,9 +456,6 @@ class AE_spikes(nn.Module):
             reconstructions.append(reconstructed)
             
         return reconstructions
-
-
-
 
 
 def load_mnist():

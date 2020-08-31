@@ -11,11 +11,11 @@ Created on Mon Jul  6 15:25:12 2020
 import os
 import matplotlib.pyplot as plt
 import numpy as np
-import pickle
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
+import test
 import ipdb
 
 # set our seed and other configurations for reproducibility
@@ -310,54 +310,10 @@ class AE_spikes(nn.Module):
                 layer.state_dict()['bias'] /= spike_height
         
 
-    '''
-    uses a list of input spikes to calculate the output values of a layer
-    the number in self.bits is the latency, max times the neuron will loop
-    '''
-    def process_layer(self, layer_idx, input_spikes):
-        # get the potentials for this layer
-        potentials = self.layers[layer_idx].potentials
-
-        # create the voltages in the cell from spikes
-        try:
-            total = self.layers[layer_idx].state_dict()['weight'].clone().detach()*(input_spikes)
-        except:
-            ipdb.set_trace()
-            pass
-        potentials += torch.sum(total,axis=1)
-        
-        # convert the voltage in the cell to spikes for output
-        output = potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
-        
-        # if neuron has spiked, subtract that from cell voltage
-        potentials[output == 1] -= 1
-        
-        return output 
-    
-    def process_first_layer(self, activations):
-        # get the potentials for this layer
-        potentials = self.layers[0].potentials
-        
-        # add the input volatges to the potentials
-        potentials += activations
-
-        # convert the voltage in the cell to spikes
-        output = potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
-
-        # if the neuron spikes, subtract 1 from potentials
-        potentials[output > 0] -= 1
-        
-        return output
-    
-
-    '''
-    resets the potentials to zero so that a new image can be processed
-    '''
     def reset(self):
+        """
+        resets the potentials to zero so that a new image can be processed
+        """
         for layer in self.layers:
             layer.reset()
 
@@ -409,14 +365,6 @@ class AE_spikes(nn.Module):
 
             # spike count of output layer.
             output_spikes = self.layers[-1].get_spike_counts()
-
-            spike_frequencies = []
-            spike_frequencies.append(self.layers[1].get_spike_frequencies())
-            spike_frequencies.append(self.layers[2].get_spike_frequencies())
-            spike_frequencies.append(self.layers[3].get_spike_frequencies())
-            spike_frequencies.append(self.layers[4].get_spike_frequencies())
-
-
 
             # get the outputs from the original network for our truth
             og_layers = []
@@ -605,9 +553,8 @@ def train_spikingnet(model, teacher, train_loader, layer_idx):
             test_examples = batch_features.view(-1, in_shape)
             model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
             break
-    
 
-    
+
 # save out the weights for the first layer, they look vaguely like parts of
 # the handwritten numbers
 def save_weight_images(weights):
@@ -683,67 +630,14 @@ def test_mnist_autoencoder(show=True):
     print(results['mMSE_AE_spikes_train'])
 
     results['tuned_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
-
-    truth = load_truth("test_data/mnist_autoencoder")
+    
+    truth = test.load_truth("test_data/mnist_autoencoder")
     if truth is None:
-        save_truth(results, "test_data/mnist_autoencoder")
+        test.save_truth(results, "test_data/mnist_autoencoder")
         return
 
-    return compare_results_with_truth(results, truth)
+    return test.compare_results_with_truth(results, truth)
 
-
-
-def compare_results_with_truth(results, truth):
-    """ results and truth are both dictionaries witht he same keys.
-    Values should be the same for the test to pass.
-    """
-    success = True
-    for key in truth.keys():
-        if not key in results:
-            print(f"Failed: {key} missing from results");
-            success = False
-            continue
-        if type(truth[key]) != type(results[key]):
-            print(f"Failed: {key} type mismatch, {type(results[key])} != {type(truth[key])}");
-            success = False
-            continue
-        if isinstance(truth[key], float):
-            # Do we need an epsilon/fuzzy comparison?
-            if truth[key] != results[key]:
-                print(f"Failed: {key} value mismatch, {results[key]} != {truth[key]}")
-                success = False
-            continue
-        if isinstance(truth[key], (np.ndarray, np.generic)):
-            # Do we need an epsilon/fuzzy comparison?
-            if not np.array_equal(truth[key], results[key]):
-                print(f"Failed: {key} array mismatch")
-                success = False
-            continue
-    return success
-
-
-def load_truth(rootpath):
-    """ Just use pickle for now. (even though it is no secure).
-    rootpath:  filepath without an extension.
-    """
-    try:
-        filepath = f"{rootpath}.pkl"
-        with open(filepath, 'rb') as fp:
-            return pickle.load(fp)
-    except:
-        print("Error loading truth.")
-        return None
-
-            
-def save_truth(results, rootpath):
-    """ Just use pickle for now. (even though it is no secure).
-    result: dictionary of values (including numpy arrays).
-    rootpath:  filepath without an extension.
-    """
-    filepath = f"{rootpath}.pkl"
-    with open(filepath, 'wb') as fp:
-        pickle.dump(results, fp)
-    
 
 
 

@@ -434,20 +434,23 @@ class AE_spikes(nn.Module):
             
             # now we have to use the spike frequencies and og layer outputs to learn            
             if layer_idx == 0:
+                spike_frequencies = self.layers[1].get_spike_frequencies()
                 self.encoder_hidden_layer.weight += ((input_activation * 16) *\
-                    torch.reshape((og_layers[0]-spike_frequencies[0]),[128,1])) * lr
+                    torch.reshape((og_layers[0]-spike_frequencies),[128,1])) * lr
                     
                 self.encoder_hidden_layer.weight += (torch.ones(input_activation.shape).to(DEVICE) *\
-                    torch.reshape((og_layers[0]-spike_frequencies[0]),[128,1])) * lr
+                    torch.reshape((og_layers[0]-spike_frequencies),[128,1])) * lr
                     
             else:
+                in_frequencies = self.layers[layer_idx].get_spike_frequencies()
+                out_frequencies = self.layers[layer_idx+1].get_spike_frequencies()
                 # +1 is to skip the spike enocder
-                self.layers[layer_idx+1].weight += ((spike_frequencies[layer_idx-1] * 16) *\
-                    torch.reshape((og_layers[layer_idx]-spike_frequencies[layer_idx]),\
+                self.layers[layer_idx+1].weight += ((in_frequencies * 16) *\
+                    torch.reshape((og_layers[layer_idx]-out_frequencies),\
                                   [len(og_layers[layer_idx]),1])) * lr
                     
-                self.layers[layer_idx+1].weight += (torch.ones(spike_frequencies[layer_idx-1].shape).to(DEVICE) *\
-                    torch.reshape((og_layers[layer_idx]-spike_frequencies[layer_idx]),\
+                self.layers[layer_idx+1].weight += (torch.ones(in_frequencies.shape).to(DEVICE) *\
+                    torch.reshape((og_layers[layer_idx]-out_frequencies),\
                                   [len(og_layers[layer_idx]),1])) * lr
             
             # convert the output spikes to voltages

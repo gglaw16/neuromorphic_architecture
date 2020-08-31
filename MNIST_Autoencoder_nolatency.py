@@ -19,16 +19,18 @@ import test
 import ipdb
 
 # set our seed and other configurations for reproducibility
-seed = 42
-torch.manual_seed(seed)
+SEED = 42
+torch.manual_seed(SEED)
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 # set the batch size, the number of training epochs, and the learning rate
-batch_size = 512
-epochs = 20
-learning_rate = 1e-3
-hidden_neurons = 128
-in_shape = 784
+BATCH_SIZE = 512
+EPOCHS = 20
+LEARNING_RATE = 1e-3
+HIDDEN_NEURONS = 128
+IN_SHAPE = 784
+
+DURATION = 16
 
 lr = 1e-4
 
@@ -186,15 +188,15 @@ class AE(nn.Module):
         super().__init__()
 
         self.encoder_hidden_layer = SpikeLinear(in_features=kwargs["input_shape"], 
-                                                out_features=hidden_neurons)
+                                                out_features=HIDDEN_NEURONS)
         
-        self.encoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
-                                                out_features=hidden_neurons)
+        self.encoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
+                                                out_features=HIDDEN_NEURONS)
         
-        self.decoder_hidden_layer = SpikeLinear(in_features=hidden_neurons, 
-                                                out_features=hidden_neurons)
+        self.decoder_hidden_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
+                                                out_features=HIDDEN_NEURONS)
         
-        self.decoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
+        self.decoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
                                                 out_features=kwargs["input_shape"])
         
 
@@ -251,27 +253,25 @@ class AE_spikes(nn.Module):
            of pretrained_model ~ use to recreate the weights exactly
     creates four layers, two for the encoder and two for the decoder, also 
     '''
-    def __init__(self, **kwargs):
+    def __init__(self, input_shape):
         super().__init__()
         self.layers = []
         
         # make the layers
-        self.encoder_input_layer = SpikeEncoder(num_features=kwargs["input_shape"])
+        self.encoder_input_layer = SpikeEncoder(num_features=input_shape)
 
-        self.encoder_hidden_layer = SpikeLinear(in_features=kwargs["input_shape"], 
-                                                out_features=hidden_neurons)
+        self.encoder_hidden_layer = SpikeLinear(in_features=input_shape, 
+                                                out_features=HIDDEN_NEURONS)
         
-        self.encoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
-                                                out_features=hidden_neurons)
+        self.encoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
+                                                out_features=HIDDEN_NEURONS)
         
-        self.decoder_hidden_layer = SpikeLinear(in_features=hidden_neurons, 
-                                                out_features=hidden_neurons)
+        self.decoder_hidden_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
+                                                out_features=HIDDEN_NEURONS)
         
-        self.decoder_output_layer = SpikeLinear(in_features=hidden_neurons, 
-                                                out_features=kwargs["input_shape"])  
+        self.decoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
+                                                out_features=input_shape)  
         
-        pretrained_model = kwargs["pretrained_model"]
-        self.copy(pretrained_model)
         
         # now append all the layers to a list.
         self.layers.append(self.encoder_input_layer)
@@ -280,7 +280,6 @@ class AE_spikes(nn.Module):
         self.layers.append(self.decoder_hidden_layer)
         self.layers.append(self.decoder_output_layer)
         
-        self.set_up_weights()
         
 
     def copy(self, in_model):
@@ -292,6 +291,8 @@ class AE_spikes(nn.Module):
         self.encoder_output_layer.copy(in_model.encoder_output_layer)
         self.decoder_hidden_layer.copy(in_model.decoder_hidden_layer)
         self.decoder_output_layer.copy(in_model.decoder_output_layer)
+
+        self.set_up_weights()
 
         
     def set_up_weights(self):
@@ -329,12 +330,12 @@ class AE_spikes(nn.Module):
             self.reset()
             # divide input into 15
             # TODO: Try to get rid of this call.
-            input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
+            input_activation = self.encoder_hidden_layer.discretize(feature)/float(DURATION)
 
-            output_spikes = torch.zeros(in_shape).to(DEVICE)
+            output_spikes = torch.zeros(IN_SHAPE).to(DEVICE)
             
             # loop through every layer until we've finished processing the spikes
-            for i in range(16):
+            for i in range(DURATION):
                 x = input_activation
                 for layer in self.layers:
                     x = layer.process(x)
@@ -354,11 +355,11 @@ class AE_spikes(nn.Module):
         for feature in features:
             # reset the potentials to zero
             self.reset()
-            # divide input into 16
-            input_activation = self.encoder_hidden_layer.discretize(feature)/16.0
+            # divide input into 16 (duration)
+            input_activation = self.encoder_hidden_layer.discretize(feature)/float(DURATION)
 
             # loop through every layer until we've finished processing the spikes
-            for i in range(16):
+            for i in range(DURATION):
                 x = input_activation
                 for layer in self.layers:
                     x = layer.process(x)
@@ -383,7 +384,7 @@ class AE_spikes(nn.Module):
             # now we have to use the spike frequencies and og layer outputs to learn            
             if layer_idx == 0:
                 spike_frequencies = self.layers[1].get_spike_frequencies()
-                self.encoder_hidden_layer.weight += ((input_activation * 16) *\
+                self.encoder_hidden_layer.weight += ((input_activation * DURATION) *\
                     torch.reshape((og_layers[0]-spike_frequencies),[128,1])) * lr
                     
                 self.encoder_hidden_layer.weight += (torch.ones(input_activation.shape).to(DEVICE) *\
@@ -393,7 +394,7 @@ class AE_spikes(nn.Module):
                 in_frequencies = self.layers[layer_idx].get_spike_frequencies()
                 out_frequencies = self.layers[layer_idx+1].get_spike_frequencies()
                 # +1 is to skip the spike enocder
-                self.layers[layer_idx+1].weight += ((in_frequencies * 16) *\
+                self.layers[layer_idx+1].weight += ((in_frequencies * DURATION) *\
                     torch.reshape((og_layers[layer_idx]-out_frequencies),\
                                   [len(og_layers[layer_idx]),1])) * lr
                     
@@ -418,7 +419,7 @@ def load_mnist():
                                                download=True)
     
     train_loader = torch.utils.data.DataLoader(train_dataset, 
-                                               batch_size=batch_size, 
+                                               batch_size=BATCH_SIZE, 
                                                shuffle=True)
     
     # get some test examples
@@ -434,18 +435,18 @@ def load_mnist():
 
 def train_autoencoder(model, train_loader):
     # Adam optimizer with learning rate 1e-3
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     # mean-squared error loss
     criterion = nn.MSELoss()
     
     # train our autoencoder for our specified number of epochs.
-    for epoch in range(epochs):
+    for epoch in range(EPOCHS):
         loss = 0
         for batch_features, _ in train_loader:
-            # reshape mini-batch data to [N, in_shape] matrix
+            # reshape mini-batch data to [N, IN_SHAPE] matrix
             # load it to the active device
-            batch_features = batch_features.view(-1, in_shape).to(DEVICE)
+            batch_features = batch_features.view(-1, IN_SHAPE).to(DEVICE)
             
             # reset the gradients back to zero
             # PyTorch accumulates gradients on subsequent backward passes
@@ -470,7 +471,7 @@ def train_autoencoder(model, train_loader):
         loss = loss / len(train_loader)
         
         # display the epoch training loss
-        print("epoch : {}/{}, recon loss = {:.8f}".format(epoch + 1, epochs, loss))
+        print("epoch : {}/{}, recon loss = {:.8f}".format(epoch + 1, EPOCHS, loss))
 
 
 def reconstruct_test_images(model, test_loader, show=True):
@@ -480,7 +481,7 @@ def reconstruct_test_images(model, test_loader, show=True):
     with torch.no_grad():
         for batch_features in test_loader:
             batch_features = batch_features[0]
-            test_examples = batch_features.view(-1, in_shape)
+            test_examples = batch_features.view(-1, IN_SHAPE)
             reconstruction = model(test_examples.to(DEVICE))
             break
     
@@ -519,7 +520,7 @@ def compute_mMSE(model, test_loader):
     with torch.no_grad():
         for batch_features in test_loader:
             batch_features = batch_features[0]
-            test_examples = batch_features.view(-1, in_shape)
+            test_examples = batch_features.view(-1, IN_SHAPE)
             reconstruction = model(test_examples.to(DEVICE))
             break
     
@@ -550,7 +551,7 @@ def train_spikingnet(model, teacher, train_loader, layer_idx):
     with torch.no_grad():
         for batch_features in train_loader:
             batch_features = batch_features[0]
-            test_examples = batch_features.view(-1, in_shape)
+            test_examples = batch_features.view(-1, IN_SHAPE)
             model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
             break
 
@@ -558,7 +559,7 @@ def train_spikingnet(model, teacher, train_loader, layer_idx):
 # save out the weights for the first layer, they look vaguely like parts of
 # the handwritten numbers
 def save_weight_images(weights):
-    for idx in len(hidden_neurons):
+    for idx in len(HIDDEN_NEURONS):
         np.save('neuron_{}'.format(idx+1),weights[0][idx].reshape(28, 28))
 
 
@@ -569,7 +570,7 @@ def compute_bins(model, test_loader, bits):
     with torch.no_grad():
         for batch_features in test_loader:
             batch_features = batch_features[0]
-            test_examples = batch_features.view(-1, in_shape)
+            test_examples = batch_features.view(-1, IN_SHAPE)
             model.save_memory(test_examples.to(DEVICE))
             break
         
@@ -599,14 +600,14 @@ def test_mnist_autoencoder(show=True):
     print(results['mMSE_AE'])
 
     # Convert the continuous network to a spiking network
-    # for now a bit depth of 16
-    bits = 16
+    # for now a integration durtation of 16
     # get some bins for discretization purposes
-    compute_bins(model, test_loader, bits)
+    compute_bins(model, test_loader, DURATION)
 
     # create a spiking model
-    spiking_model = AE_spikes(input_shape=in_shape,
-                              pretrained_model=model).to(DEVICE)
+    spiking_model = AE_spikes(input_shape=IN_SHAPE)
+    spiking_model.copy(model)
+    spiking_model.to(DEVICE)
 
     # compute the mse of the spiking model
     results['mMSE_AE_spikes'] = compute_mMSE(spiking_model, test_loader)
@@ -654,7 +655,7 @@ for bit_depth in range(2,64):
     bins = compute_bins(model, test_loader, bits)
 
     # create a spiking model
-    spiking_model = AE_spikes(bits=bits,bins=bins,input_shape=in_shape,
+    spiking_model = AE_spikes(bits=bits,bins=bins,input_shape=IN_SHAPE,
                               pretrained_model=model).to(DEVICE)
     
     

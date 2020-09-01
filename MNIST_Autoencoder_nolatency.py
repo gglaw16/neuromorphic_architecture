@@ -40,6 +40,49 @@ DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
 
+# autoencoder class with fully connected layers for both encoder and decoder
+class AE(nn.Module):
+    '''
+    kwargs of input_shape ~ use to tell the shape of the mnist image
+    creates four layers, two for the encoder and two for the decoder
+    '''
+    def __init__(self, **kwargs):
+        super().__init__()
+
+        self.encoder_hidden_layer = nn.Linear(in_features=kwargs["input_shape"], 
+                                              out_features=HIDDEN_NEURONS)
+        
+        self.encoder_output_layer = nn.Linear(in_features=HIDDEN_NEURONS, 
+                                              out_features=HIDDEN_NEURONS)
+        
+        self.decoder_hidden_layer = nn.Linear(in_features=HIDDEN_NEURONS, 
+                                              out_features=HIDDEN_NEURONS)
+        
+        self.decoder_output_layer = nn.Linear(in_features=HIDDEN_NEURONS, 
+                                                out_features=kwargs["input_shape"])
+        
+        self.layers = [self.encoder_hidden_layer, self.encoder_output_layer,
+                       self.decoder_hidden_layer, self.decoder_output_layer]
+
+        
+    '''
+    a method updated from the super class, runs input through all the layers
+    '''
+    def forward(self, features):
+        activation = self.encoder_hidden_layer(features) # performs matmul of input and weights
+        activation = torch.relu(activation) # only output vals >= 0
+        code = self.encoder_output_layer(activation)
+        code = torch.relu(code)
+        activation_decoder = self.decoder_hidden_layer(code)
+        activation_decoder = torch.relu(activation_decoder)
+        reconstructed = self.decoder_output_layer(activation_decoder)
+        reconstructed = torch.relu(reconstructed)
+        
+        return reconstructed
+
+
+
+
 # encoding (analog to spiking) layer
 class SpikeEncoder(nn.Identity):
     def __init__(self, num_features):
@@ -178,45 +221,8 @@ class SpikeLinear(nn.Linear):
 
         
         
-# autoencoder class with fully connected layers for both encoder and decoder
-class AE(nn.Module):
-    '''
-    kwargs of input_shape ~ use to tell the shape of the mnist image
-    creates four layers, two for the encoder and two for the decoder
-    '''
-    def __init__(self, **kwargs):
-        super().__init__()
 
-        self.encoder_hidden_layer = SpikeLinear(in_features=kwargs["input_shape"], 
-                                                out_features=HIDDEN_NEURONS)
-        
-        self.encoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=HIDDEN_NEURONS)
-        
-        self.decoder_hidden_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=HIDDEN_NEURONS)
-        
-        self.decoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=kwargs["input_shape"])
-        
-        self.layers = [self.encoder_hidden_layer, self.encoder_output_layer,
-                       self.decoder_hidden_layer, self.decoder_output_layer]
 
-        
-    '''
-    a method updated from the super class, runs input through all the layers
-    '''
-    def forward(self, features):
-        activation = self.encoder_hidden_layer(features) # performs matmul of input and weights
-        activation = torch.relu(activation) # only output vals >= 0
-        code = self.encoder_output_layer(activation)
-        code = torch.relu(code)
-        activation_decoder = self.decoder_hidden_layer(code)
-        activation_decoder = torch.relu(activation_decoder)
-        reconstructed = self.decoder_output_layer(activation_decoder)
-        reconstructed = torch.relu(reconstructed)
-        
-        return reconstructed
     
 # autoencoder spiking network
 class AE_spikes(nn.Module):

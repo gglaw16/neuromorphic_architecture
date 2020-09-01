@@ -199,7 +199,10 @@ class AE(nn.Module):
         self.decoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
                                                 out_features=kwargs["input_shape"])
         
+        self.layers = [self.encoder_hidden_layer, self.encoder_output_layer,
+                       self.decoder_hidden_layer, self.decoder_output_layer]
 
+        
     '''
     a method updated from the super class, runs input through all the layers
     '''
@@ -215,37 +218,6 @@ class AE(nn.Module):
         
         return reconstructed
     
-    '''
-    this saves to memory all the possible values for each layer's output
-    basically does the same thing as forward otherwise
-    '''
-    def save_memory(self, features):
-        activation = self.encoder_hidden_layer.save_memory(features)
-        activation = torch.relu(activation)
-        code = self.encoder_output_layer.save_memory(activation)
-        code = torch.relu(code)
-        activation_decoder = self.decoder_hidden_layer.save_memory(code)
-        activation_decoder = torch.relu(activation_decoder)
-        reconstructed = self.decoder_output_layer.save_memory(activation_decoder)
-        reconstructed = torch.relu(reconstructed)
-        
-        #self.memory[0].append(features.cpu().numpy())
-        #self.memory[1].append(activation.cpu().numpy())
-        #self.memory[2].append(code.cpu().numpy())
-        #self.memory[3].append(activation_decoder.cpu().numpy())
-        #self.memory[4].append(reconstructed.cpu().numpy())
-        
-    '''
-    uses the the memory in order to create a list of bins for the spiking
-    network to use for discretization purposes
-    '''
-    def create_bins(self, bits):
-        self.encoder_hidden_layer.create_bins(bits)
-        self.encoder_output_layer.create_bins(bits)
-        self.decoder_hidden_layer.create_bins(bits)
-        self.decoder_output_layer.create_bins(bits)
-    
- 
 # autoencoder spiking network
 class AE_spikes(nn.Module):
     '''
@@ -279,8 +251,74 @@ class AE_spikes(nn.Module):
         self.layers.append(self.encoder_output_layer)
         self.layers.append(self.decoder_hidden_layer)
         self.layers.append(self.decoder_output_layer)
+
+
+
+    def _save_memory(self, in_features):
+        '''
+        internal method. This saves to memory all the possible values for each layer's output
+        basically does the same thing as forward otherwise
+        '''
+        # Execute the network on this input, and have eachlayer record activations.
+        activation = self.encoder_hidden_layer.save_memory(in_features)
+        activation = torch.relu(activation)
+        code = self.encoder_output_layer.save_memory(activation)
+        code = torch.relu(code)
+        activation_decoder = self.decoder_hidden_layer.save_memory(code)
+        activation_decoder = torch.relu(activation_decoder)
+        reconstructed = self.decoder_output_layer.save_memory(activation_decoder)
+        reconstructed = torch.relu(reconstructed)
+
         
+
+    def _create_bins(self, num_bins):
+        '''
+        uses the the memory in order to create a list of bins for the spiking
+        network to use for discretization purposes
+        '''
+        self.encoder_hidden_layer.create_bins(num_bins)
+        self.encoder_output_layer.create_bins(num_bins)
+        self.decoder_hidden_layer.create_bins(num_bins)
+        self.decoder_output_layer.create_bins(num_bins)
+    
         
+    # This can still be simplified and handled mostly by the layers.
+    # TODO: Combine activation range computation (_save_memory) (bins)
+    # with normalizing weights (_set_up_weights) and put in layers.
+    def translate(self, test_loader, duration=16):
+        """ Use loaded continuous weights and convert to spiking network weights and state.
+        test_loaded: (torch.utils.data.DataLoader) source images to inspect activation ranges.
+        duration: number of time steps used to count spikes to compute firing rate.
+        """
+        with torch.no_grad():
+            for batch_features in test_loader:
+                batch_features = batch_features[0]
+                test_examples = batch_features.view(-1, IN_SHAPE)
+                #self._save_memory(test_examples.to(DEVICE))
+                self._save_memory(test_examples)
+                break
+        
+        self._create_bins(duration)
+
+        # Adjust weights to normalize the firing rates.
+        self._set_up_weights()
+        
+
+    def _set_up_weights(self):
+        for layer in self.layers:
+            if isinstance(layer, SpikeLinear):
+                # calculate how much voltage each spike causes in the neuron
+                spike_height = layer.in_bins[1]-layer.in_bins[0]
+                # multiply that into the weights
+                layer.state_dict()['weight'] *= spike_height
+                layer.state_dict()['bias'] *= spike_height
+            
+                # now do the same except for the output spike height
+                spike_height = layer.out_bins[1]-layer.out_bins[0]
+                # divide that into the weights
+                layer.state_dict()['weight'] /= spike_height
+                layer.state_dict()['bias'] /= spike_height
+
 
     def copy(self, in_model):
         """ Convert might be a better name.
@@ -295,22 +333,6 @@ class AE_spikes(nn.Module):
         self.set_up_weights()
 
         
-    def set_up_weights(self):
-        for layer in self.layers:
-            if isinstance(layer, SpikeLinear):
-                # calculate how much voltage each spike causes in the neuron
-                spike_height = layer.in_bins[1]-layer.in_bins[0]
-                # multiply that into the weights
-                layer.state_dict()['weight'] *= spike_height
-                layer.state_dict()['bias'] *= spike_height
-            
-                # now do the same except for the output spike height
-                spike_height = layer.out_bins[1]-layer.out_bins[0]
-                # divide that into the weights
-                layer.state_dict()['weight'] /= spike_height
-                layer.state_dict()['bias'] /= spike_height
-        
-
     def reset(self):
         """
         resets the potentials to zero so that a new image can be processed
@@ -599,27 +621,41 @@ def test_mnist_autoencoder(show=True):
     print("Mean Squared Error of OG Model:")
     print(results['mMSE_AE'])
 
-    # Convert the continuous network to a spiking network
-    # for now a integration durtation of 16
-    # get some bins for discretization purposes
-    compute_bins(model, test_loader, DURATION)
 
     # create a spiking model
     spiking_model = AE_spikes(input_shape=IN_SHAPE)
-    spiking_model.copy(model)
+    # Copy in the trained weights.
+    spiking_model.load_state_dict(model.state_dict())
+    #compute_bins(spiking_model, test_loader, DURATION)    
+    spiking_model.translate(test_loader, DURATION)
     spiking_model.to(DEVICE)
+
+    
+    # Convert the continuous network to a spiking network
+    # for now a integration durtation of 16
+    # get some bins for discretization purposes
+    #compute_bins(model, test_loader, DURATION)
+
+    #for idx, layer in enumerate(model.layers):
+    #    results[f'in_bins_{idx}'] = layer.in_bins
+    #    results[f'out_bins_{idx}'] = layer.out_bins
+    
+    # create a spiking model
+    #spiking_model = AE_spikes(input_shape=IN_SHAPE)
+    #spiking_model.copy(model)
+    #spiking_model.to(DEVICE)
 
     # compute the mse of the spiking model
     results['mMSE_AE_spikes'] = compute_mMSE(spiking_model, test_loader)
     print("Mean Squared Error of Spiking Model:")
     print(results['mMSE_AE_spikes'])
 
-    numpy_results = []
+    #numpy_results = []
     
     results['continuous_reconstruction'] = reconstruct_test_images(model, test_loader, show)
     results['spiking_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
 
-    # Tune/train the spiking network
+    ## Tune/train the spiking network
     for i in range(5):
         print("Epoch %d"%(i+1))
         for layer_idx in range(4):
@@ -629,21 +665,14 @@ def test_mnist_autoencoder(show=True):
             print(mMSE_AE_spikes_train)
     results['mMSE_AE_spikes_train'] = mMSE_AE_spikes_train
     print(results['mMSE_AE_spikes_train'])
-
     results['tuned_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
     
-    truth = test.load_truth("test_data/mnist_autoencoder")
-    if truth is None:
-        test.save_truth(results, "test_data/mnist_autoencoder")
-        return
-
-    return test.compare_results_with_truth(results, truth)
+    return results
 
 
 
+test.evaulate_results(test_mnist_autoencoder(show=False), 'mnist_autoencoder')
 
-if test_mnist_autoencoder(show=False):
-    print("mnist autoencoder test passed")
 
 
 """

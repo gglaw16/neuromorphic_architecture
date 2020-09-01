@@ -15,7 +15,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
+
+import spike
 import test
+
 import ipdb
 
 # set our seed and other configurations for reproducibility
@@ -83,146 +86,6 @@ class AE(nn.Module):
 
 
 
-# encoding (analog to spiking) layer
-class SpikeEncoder(nn.Identity):
-    def __init__(self, num_features):
-        super().__init__(num_features)        
-        self.potentials = torch.zeros((1,num_features), device=DEVICE)
-        self.spike_counts = torch.zeros(num_features).to(DEVICE)
-
-    def get_spike_frequencies(self):
-        return self.spike_counts / self.frequency_duration
-
-    def reset(self):
-        """ Reset membrane potential and counts to start computing spikes and frequency a new.
-        """
-        self.potentials.fill_(0.0)
-        self.spike_counts.fill_(0.0)
-        self.frequency_duration = 0
-        
-    def process(self, activations):
-        """ Activations are continuous values, returns output spikes (binary values).
-        """
-        # get the potentials for this layer
-        potentials = self.potentials
-        # add the input currents to the membrane potentials (capacitence)
-        potentials += activations
-        # convert the voltage in the cell to spikes
-        output = potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
-        # if the neuron spikes, subtract 1 from potentials
-        potentials[output > 0] -= 1
-
-        # For learning.
-        self.spike_counts += output.sum(axis=0)
-        self.frequency_duration += 1
-        
-        return output
-    
-
-
-
-
-# spiking linear layer
-class SpikeLinear(nn.Linear):
-    def __init__(self, in_features, out_features):
-        super().__init__(in_features=in_features, out_features=out_features)        
-        # There is duplication of output/inputs bwtween layers, but
-        # this allows mamangent of memeory and bins in layers.
-        # An alternative is to create a spike encoding layer to manage input bins.
-        self.in_memory = []
-        self.in_bins = []
-        self.out_memory = []        
-        self.out_bins = []        
-        self.potentials = torch.zeros((1,out_features), device=DEVICE)
-        self.spike_counts = torch.zeros(out_features).to(DEVICE)
-        self.frequency_duration = 0
-
-        
-    # TODO: Overwrite superclass execute layer method
-    def process(self, input_spikes):
-        """ Uses a list of input spikes to calculate the output values of a layer.
-        """
-        # get the potentials for this layer
-        potentials = self.potentials
-
-        # create the voltages in the cell from input spikes (currents)
-        total = self.state_dict()['weight'].clone().detach()*(input_spikes)
-        potentials += torch.sum(total,axis=1)
-        
-        # convert the voltage in the cell to spikes for output
-        output = potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
-        
-        # if neuron has spiked, subtract that from cell voltage
-        potentials[output == 1] -= 1
-        
-        # For learning.
-        self.spike_counts += output
-        self.frequency_duration += 1
-
-        return output 
-
-
-    def get_spike_frequencies(self):
-        return self.spike_counts / self.frequency_duration
-
-    
-    # TODO: Try to get rid of this.
-    def get_spike_counts(self):
-        return self.spike_counts
-    
-                
-    def reset(self):
-        """ Reset membrane potential and counts to start computing spikes and frequency a new.
-        """
-        self.potentials = self.state_dict()['bias'].clone().detach()
-        self.spike_counts.fill_(0.0)
-        self.frequency_duration = 0
-        
-        
-    def save_memory(self, x):
-        """ This is an alternative execute function that also records input and output
-        activation functions.  This is required to chose a discritization for spking.
-        We may only have to save the maximum.  I think np.histogram_bin_edges(...)
-        only uses max and min.  However, ouliers may cause trouble.
-        """
-        self.in_memory.append(x.cpu().numpy())
-        x = self(x)
-        tmp = torch.relu(x)
-        self.out_memory.append(tmp.cpu().numpy())
-        return x
-        
-    def create_bins(self, bits):
-        self.bits = bits
-        self.in_bins = np.histogram_bin_edges(self.in_memory, bins=bits)
-        self.out_bins = np.histogram_bin_edges(self.out_memory, bins=bits)
-
-    def copy(self, source_layer):
-        # Copy weights and biases
-        self.load_state_dict(source_layer.state_dict())
-        # Copy bins
-        self.in_bins = np.copy(source_layer.in_bins)
-        self.out_bins = np.copy(source_layer.out_bins)
-
-    # TODO: Try to get rid of this method.
-    def discretize(self, values):
-        """
-        uses the bins input in the init to change input values to a discrete number
-        of spikes, uses idx to figure out which list of bins to use
-        """
-        spikes = np.digitize(values.cpu(), self.in_bins)-1
-        return torch.from_numpy(spikes).to(DEVICE)
-
-    def reconstruct(self, output_spikes):
-        return output_spikes*(self.out_bins[1]-self.out_bins[0])
-
-        
-        
-
-
     
 # autoencoder spiking network
 class AE_spikes(nn.Module):
@@ -236,19 +99,19 @@ class AE_spikes(nn.Module):
         self.layers = []
         
         # make the layers
-        self.encoder_input_layer = SpikeEncoder(num_features=input_shape)
+        self.encoder_input_layer = spike.Encoder(num_features=input_shape)
 
-        self.encoder_hidden_layer = SpikeLinear(in_features=input_shape, 
-                                                out_features=HIDDEN_NEURONS)
+        self.encoder_hidden_layer = spike.Linear(in_features=input_shape, 
+                                                 out_features=HIDDEN_NEURONS)
         
-        self.encoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=HIDDEN_NEURONS)
+        self.encoder_output_layer = spike.Linear(in_features=HIDDEN_NEURONS, 
+                                                 out_features=HIDDEN_NEURONS)
         
-        self.decoder_hidden_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=HIDDEN_NEURONS)
+        self.decoder_hidden_layer = spike.Linear(in_features=HIDDEN_NEURONS, 
+                                                 out_features=HIDDEN_NEURONS)
         
-        self.decoder_output_layer = SpikeLinear(in_features=HIDDEN_NEURONS, 
-                                                out_features=input_shape)  
+        self.decoder_output_layer = spike.Linear(in_features=HIDDEN_NEURONS, 
+                                                 out_features=input_shape)  
         
         
         # now append all the layers to a list.
@@ -261,10 +124,9 @@ class AE_spikes(nn.Module):
 
 
     def _save_memory(self, in_features):
-        '''
-        internal method. This saves to memory all the possible values for each layer's output
-        basically does the same thing as forward otherwise
-        '''
+        """internal method. This executes the network in continuous mode for a single input.
+        Activations are recorded so weigths can be normalized for spking execution.
+        """
         # Execute the network on this input, and have eachlayer record activations.
         activation = self.encoder_hidden_layer.save_memory(in_features)
         activation = torch.relu(activation)
@@ -275,7 +137,6 @@ class AE_spikes(nn.Module):
         reconstructed = self.decoder_output_layer.save_memory(activation_decoder)
         reconstructed = torch.relu(reconstructed)
 
-        
 
     def _create_bins(self, num_bins):
         '''
@@ -307,23 +168,8 @@ class AE_spikes(nn.Module):
         self._create_bins(duration)
 
         # Adjust weights to normalize the firing rates.
-        self._set_up_weights()
-        
-
-    def _set_up_weights(self):
         for layer in self.layers:
-            if isinstance(layer, SpikeLinear):
-                # calculate how much voltage each spike causes in the neuron
-                spike_height = layer.in_bins[1]-layer.in_bins[0]
-                # multiply that into the weights
-                layer.state_dict()['weight'] *= spike_height
-                layer.state_dict()['bias'] *= spike_height
-            
-                # now do the same except for the output spike height
-                spike_height = layer.out_bins[1]-layer.out_bins[0]
-                # divide that into the weights
-                layer.state_dict()['weight'] /= spike_height
-                layer.state_dict()['bias'] /= spike_height
+            layer.translate_weights()
 
 
     def copy(self, in_model):
@@ -592,17 +438,17 @@ def save_weight_images(weights):
 
 
 # get the bins from the model using the test dataset
-def compute_bins(model, test_loader, bits):
-    test_examples = None
-
-    with torch.no_grad():
-        for batch_features in test_loader:
-            batch_features = batch_features[0]
-            test_examples = batch_features.view(-1, IN_SHAPE)
-            model.save_memory(test_examples.to(DEVICE))
-            break
-        
-    model.create_bins(bits)
+#def compute_bins(model, test_loader, bits):
+#    test_examples = None
+#
+#    with torch.no_grad():
+#        for batch_features in test_loader:
+#            batch_features = batch_features[0]
+#            test_examples = batch_features.view(-1, IN_SHAPE)
+#            model.save_memory(test_examples.to(DEVICE))
+#            break
+#        
+#    model.create_bins(bits)
     
         
 def test_mnist_autoencoder(show=True):
@@ -632,24 +478,8 @@ def test_mnist_autoencoder(show=True):
     spiking_model = AE_spikes(input_shape=IN_SHAPE)
     # Copy in the trained weights.
     spiking_model.load_state_dict(model.state_dict())
-    #compute_bins(spiking_model, test_loader, DURATION)    
     spiking_model.translate(test_loader, DURATION)
     spiking_model.to(DEVICE)
-
-    
-    # Convert the continuous network to a spiking network
-    # for now a integration durtation of 16
-    # get some bins for discretization purposes
-    #compute_bins(model, test_loader, DURATION)
-
-    #for idx, layer in enumerate(model.layers):
-    #    results[f'in_bins_{idx}'] = layer.in_bins
-    #    results[f'out_bins_{idx}'] = layer.out_bins
-    
-    # create a spiking model
-    #spiking_model = AE_spikes(input_shape=IN_SHAPE)
-    #spiking_model.copy(model)
-    #spiking_model.to(DEVICE)
 
     # compute the mse of the spiking model
     results['mMSE_AE_spikes'] = compute_mMSE(spiking_model, test_loader)
@@ -677,7 +507,7 @@ def test_mnist_autoencoder(show=True):
 
 
 
-test.evaulate_results(test_mnist_autoencoder(show=False), 'mnist_autoencoder')
+test.evaluate_results(test_mnist_autoencoder(show=False), 'mnist_autoencoder')
 
 
 

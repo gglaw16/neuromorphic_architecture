@@ -206,21 +206,22 @@ class AE_spikes(nn.Module):
             # TODO: Try to get rid of this call.
             input_activation = self.encoder_hidden_layer.discretize(feature)/float(DURATION)
 
-            output_spikes = torch.zeros(IN_SHAPE).to(DEVICE)
+            output_spike_counts = torch.zeros(IN_SHAPE).to(DEVICE)
             
             # loop through every layer until we've finished processing the spikes
             for i in range(DURATION):
                 x = input_activation
                 for layer in self.layers:
                     x = layer.process(x)
-                output_spikes += x
-                
+                output_spike_counts += x
+
             # convert the output spikes to voltages
-            reconstructed = self.decoder_output_layer.reconstruct(output_spikes)
+            reconstructed = self.decoder_output_layer.reconstruct(output_spike_counts / float(DURATION))
             # add the reconstructed image to the list
             reconstructions.append(reconstructed)
             
         return reconstructions
+
     
     def forward_learn(self, features, layer_idx, teacher):
         reconstructions = []
@@ -239,7 +240,8 @@ class AE_spikes(nn.Module):
                     x = layer.process(x)
 
             # spike count of output layer.
-            output_spikes = self.layers[-1].get_spike_counts()
+            output_layer = self.layers[-1]
+            output_spike_freq = output_layer.get_spike_frequencies()
 
             # get the outputs from the original network for our truth
             og_layers = []
@@ -277,7 +279,7 @@ class AE_spikes(nn.Module):
                                   [len(og_layers[layer_idx]),1])) * lr
             
             # convert the output spikes to voltages
-            reconstructed = self.layers[4].reconstruct(output_spikes)
+            reconstructed = self.layers[4].reconstruct(output_spike_freq)
             # add the reconstructed image to the list
             reconstructions.append(reconstructed)
             

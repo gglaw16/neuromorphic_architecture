@@ -256,15 +256,18 @@ class AE_spikes(nn.Module):
             og_layers[1] /= self.layers[2].out_bins[-1]
             og_layers[2] /= self.layers[3].out_bins[-1]
             og_layers[3] /= self.layers[4].out_bins[-1]
+
             
             # now we have to use the spike frequencies and og layer outputs to learn            
             if layer_idx == 0:
                 spike_frequencies = self.layers[1].get_spike_frequencies()
                 self.encoder_hidden_layer.weight += ((input_activation * DURATION) *\
                     torch.reshape((og_layers[0]-spike_frequencies),[128,1])) * lr
-                    
-                self.encoder_hidden_layer.weight += (torch.ones(input_activation.shape).to(DEVICE) *\
-                    torch.reshape((og_layers[0]-spike_frequencies),[128,1])) * lr
+                #ipdb.set_trace()
+                self.encoder_hidden_layer.bias += (torch.ones(input_activation.shape).to(DEVICE) *\
+                    torch.reshape((og_layers[0]-spike_frequencies),[128,1]))[:,0] * lr
+                
+                error = og_layers[0]-spike_frequencies
                     
             else:
                 in_frequencies = self.layers[layer_idx].get_spike_frequencies()
@@ -274,16 +277,18 @@ class AE_spikes(nn.Module):
                     torch.reshape((og_layers[layer_idx]-out_frequencies),\
                                   [len(og_layers[layer_idx]),1])) * lr
                     
-                self.layers[layer_idx+1].weight += (torch.ones(in_frequencies.shape).to(DEVICE) *\
+                self.layers[layer_idx+1].bias += (torch.ones(in_frequencies.shape).to(DEVICE) *\
                     torch.reshape((og_layers[layer_idx]-out_frequencies),\
-                                  [len(og_layers[layer_idx]),1])) * lr
+                                  [len(og_layers[layer_idx]),1]))[:,0] * lr
+
+                error = og_layers[layer_idx]-out_frequencies
             
             # convert the output spikes to voltages
             reconstructed = self.layers[4].reconstruct(output_spike_freq)
             # add the reconstructed image to the list
             reconstructions.append(reconstructed)
             
-        return reconstructions
+        return error.mean()
 
 
 def load_mnist():
@@ -422,14 +427,16 @@ def compute_mMSE(model, test_loader):
 
 def train_spikingnet(model, teacher, train_loader, layer_idx):
     test_examples = None
-
+    b = 1
     # create the reconstructions using the model
     with torch.no_grad():
         for batch_features in train_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, IN_SHAPE)
-            model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
-            break
+            error = model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
+            print("  Batch %d"%b)
+            print("   error: %f"%error)
+            b +=1
 
 
 # save out the weights for the first layer, they look vaguely like parts of
@@ -497,7 +504,7 @@ def test_mnist_autoencoder(show=True):
     for i in range(5):
         print("Epoch %d"%(i+1))
         for layer_idx in range(4):
-            print("Layer %d"%(layer_idx+1))
+            print(" Layer %d"%(layer_idx+1))
             train_spikingnet(spiking_model, model, train_loader, layer_idx)
             mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader)
             print(mMSE_AE_spikes_train)

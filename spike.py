@@ -95,6 +95,7 @@ class Linear(nn.Linear):
         # divide that into the weights
         self.state_dict()['weight'] /= spike_height
         self.state_dict()['bias'] /= spike_height
+        self.state_dict()['bias'] /= 16.0
         
         
     # TODO: Overwrite superclass execute layer method
@@ -103,22 +104,24 @@ class Linear(nn.Linear):
         """
 
         # create the voltages in the cell from input spikes (currents)
-        total = self.state_dict()['weight'].clone().detach()*(input_spikes)
-
+        #total = self.state_dict()['weight'].clone().detach()*(input_spikes)
+        input_current = self(input_spikes)
+        
         # get the potentials for this layer
         if self.potentials is None:
-            self.potentials = self.state_dict()['bias'].clone().detach()        
+            self.potentials = torch.zeros(input_current.shape, device=input_current.device)
 
-        potentials = self.potentials
-        potentials += torch.sum(total,axis=1)
+        #self.potentials += torch.sum(input_current,axis=1)
+        # Integrate current witn membrane capacitance to get voltage.
+        self.potentials += input_current
         
         # convert the voltage in the cell to spikes for output
-        output = potentials.clone().detach()
+        output = self.potentials.clone().detach()
         output[output > 1] = 1
         output[output < 1] = 0
         
         # if neuron has spiked, subtract that from cell voltage
-        potentials[output == 1] -= 1
+        self.potentials[output == 1] -= 1
         
         # For learning.
         if self.spike_counts is None:

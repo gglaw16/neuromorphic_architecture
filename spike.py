@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import ipdb
+#import ipdb
 
 
 # Subclasses of torch.nn layers that have extra functionality for spiking.
@@ -169,14 +169,6 @@ class Linear(nn.Linear):
         self.in_bins = np.copy(source_layer.in_bins)
         self.out_bins = np.copy(source_layer.out_bins)
 
-    # TODO: Try to get rid of this method.
-    def discretize(self, values):
-        """
-        uses the bins input in the init to change input values to a discrete number
-        of spikes, uses idx to figure out which list of bins to use
-        """
-        spikes = np.digitize(values.cpu(), self.in_bins)-1
-        return torch.from_numpy(spikes).to(values.device)
 
     def reconstruct(self, output_spike_freq):
         output_spike_counts = output_spike_freq * self.frequency_duration            
@@ -238,7 +230,7 @@ class Conv2d(nn.Conv2d):
             self.potentials = torch.zeros(total.shape,
                                           device=total.device)
             # Broadcast the biases to initializ the potential
-            self.potentials = potentials + self.spike_bias 
+            self.potentials = self.potentials + self.spike_bias 
 
         self.potentials += torch.sum(total,axis=1)
         

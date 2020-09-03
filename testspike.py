@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import pickle
-import ipdb
+#import ipdb
 
 
 
@@ -59,7 +59,7 @@ def compare_results_with_truth(results, truth, label=""):
             return False
         return True
     
-    if isinstance(result, float):
+    if isinstance(results, float):
         # Do we need an epsilon/fuzzy comparison?
         if truth != results:
             print(f"Failed {label}: float value mismatch, {results} != {truth}")

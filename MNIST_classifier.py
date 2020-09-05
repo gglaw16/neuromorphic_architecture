@@ -19,7 +19,7 @@ import torchvision
 import spike
 import testspike
 
-#import ipdb
+import ipdb
 
 # set our seed and other configurations for reproducibility
 SEED = 42
@@ -37,7 +37,7 @@ OUT_SHAPE = 10
 
 DURATION = 16
 
-lr = 1e-4
+SPIKE_LEARNING_RATE = 1e-3
 
 
 # use gpu if available
@@ -184,121 +184,110 @@ class CF_spikes(nn.Module):
     a method updated from the super class, runs input through all the layers
     '''
     def forward(self, features):
-        outputs = []
         # loop through every image in the batch
-        for feature in features:
-            # reset the potentials to zero
-            self.reset()
+        # reset the potentials to zero
+        self.reset()
 
-            output_spike_counts = torch.zeros(OUT_SHAPE).to(DEVICE)
-            
-            # loop through every layer until we've finished processing the spikes
-            for i in range(DURATION):
-                x = feature
-                for layer in self.layers:
-                    x = layer.process(x)
-                output_spike_counts += x
+        # loop through every layer until we've finished processing the spikes
+        for i in range(DURATION):
+            x = features
+            for layer in self.layers:
+                x = layer.process(x)
 
-            # convert the output spikes to voltages
-            output = self.layers[-1].reconstruct(output_spike_counts / float(DURATION))
-            # add the reconstructed image to the list
-            outputs.append(output)
+        # convert the output spikes to continuous voltages
+        output_layer = self.layers[-1]
+        output = output_layer.get_activation()
             
-        return outputs
+        return output
 
     
-    def forward_learn(self, features, layer_idx, teacher):
+    def forward_learn(self, features, layer_idx, teacher, learning_rate):
+        # reset the potentials to zero
+        self.reset()
 
-        # loop through every image in the batch
-        for feature in features:
-            # reset the potentials to zero
-            self.reset()
+        # loop through every layer until we've finished processing the spikes
+        # Process the entire batch at the same time.
+        for i in range(DURATION):
+            x = features
+            for layer in self.layers:
+                x = layer.process(x)
 
-            # loop through every layer until we've finished processing the spikes
-            for i in range(DURATION):
-                x = feature
-                for layer in self.layers:
-                    x = layer.process(x)
+        # get the outputs from the original network for our truth
+        og_layers = []
+        lrelu = nn.LeakyReLU()
+        og_layers.append(torch.relu(teacher.input_layer(features)))
+        og_layers.append(torch.relu(teacher.hidden_layer(og_layers[0])))
+        og_layers.append(lrelu(teacher.output_layer(og_layers[1])))
 
-
-            # get the outputs from the original network for our truth
-            og_layers = []
-            lrelu = nn.LeakyReLU()
-            og_layers.append(torch.relu(teacher.input_layer(feature)))
-            og_layers.append(torch.relu(teacher.hidden_layer(og_layers[0])))
-            og_layers.append(lrelu(teacher.output_layer(og_layers[1])))
-
-
-            # change to frequencies by using max bin
-            # Skip the spike enocder layer.  TODO: See if we can generalize.
-            for layer_idx in range(len(og_layers)):
-                og_layers[layer_idx] /= self.layers[layer_idx+1].out_bins[-1]
-
+        # change to frequencies by using max bin
+        # Skip the spike enocder layer.  TODO: See if we can generalize.
+        for idx in range(len(og_layers)):
+            og_layers[idx] /= self.layers[idx+1].out_bins[-1]
             
-            # now we have to use the spike frequencies and og layer outputs to learn 
+        # now we have to use the spike frequencies and og layer outputs to learn 
+        in_frequencies = self.layers[layer_idx].get_spike_frequencies()    
+        out_frequencies = self.layers[layer_idx+1].get_spike_frequencies()
+        # +1 is to skip the spike enocder
             
-            # the first layer is a special case for the in_frequencies
-            if layer_idx == 0:
-                in_frequencies = feature                    
-            else:
-                in_frequencies = self.layers[layer_idx].get_spike_frequencies()
-                
-                
-            out_frequencies = self.layers[layer_idx+1].get_spike_frequencies()
-            # +1 is to skip the spike enocder
-            
-            error = og_layers[layer_idx]-out_frequencies
-                
-            self.layers[layer_idx+1].weight += ((in_frequencies * DURATION) *\
-                torch.reshape(error, [len(og_layers[layer_idx]),1])) * lr
-                    
-            self.layers[layer_idx+1].bias += (torch.ones(in_frequencies.shape).to(DEVICE) *\
-                torch.reshape(error, [len(og_layers[layer_idx]),1]))[:,0] * lr
+        error = og_layers[layer_idx]-out_frequencies
 
-            
-        return error.mean()
+        # Should we do sum or mean?
+        self.layers[layer_idx+1].weight += torch.matmul(error.transpose(0,1), in_frequencies) * learning_rate
+        self.layers[layer_idx+1].bias += error.sum(axis=0) * learning_rate
+
+        return (error*error).mean()
     
     
-    def last_layer_learn(self, features, labels, teacher):
+    def last_layer_learn(self, features, labels, learning_rate):
+        """ many small unimportant changes are overwhelming important error.
+        out_freq = self(features)
+        # Seems to be returning spike counts
+        out_layer = self.layers[-1]
+        out_freq = out_layer.get_spike_frequencies()
+        # Now it ranges from 0 to 1.
 
-        # loop through every image in the batch
-        for feature,label in features,labels:
-            # reset the potentials to zero
-            self.reset()
-            # divide input into 16 (duration)
-            input_activation = self.encoder_hidden_layer.discretize(feature)/float(DURATION)
+        # the in frequencies are from the second to last layer
+        in_freq = self.layers[-2].get_spike_frequencies()
 
-            # loop through every layer until we've finished processing the spikes
-            for i in range(DURATION):
-                x = input_activation
-                for layer in self.layers:
-                    x = layer.process(x)
+        # Fabricate the desired output. (one hot)
+        labels = labels.to(out_freq.device)
+        truth = torch.nn.functional.one_hot(labels)
+        error = truth - out_freq
 
-            # spike count of output layer.
-            output_spike_freq = self.layers[-1].get_spike_frequencies()
+        # Should we do sum or mean?
+        out_layer.weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
+        out_layer.bias += error.sum(axis=0) * learning_rate
             
-            # now we have to use the spike frequencies and truth to learn 
-            
-            # the in_frequencies is the second to last layer
-            in_frequencies = self.layers[-2].get_spike_frequencies()
-                
-                
-            truth = torch.zeros(OUT_SHAPE)
-            truth[label] = 1
-            # +1 is to skip the spike enocder
-            
-            error = truth-output_spike_freq
-                
-            self.layers[-1].weight += ((in_frequencies * DURATION) *\
-                torch.reshape(error, [len(truth),1])) * lr
-                    
-            self.layers[-1].bias += (torch.ones(in_frequencies.shape).to(DEVICE) *\
-                torch.reshape(error, [len(truth),1]))[:,0] * lr
+        return (error*error).mean()
+        """
 
+        out_freq = self(features)
+        # Seems to be returning spike counts
+        out_layer = self.layers[-1]
+        out_freq = out_layer.get_spike_frequencies()
+        # Now it ranges from 0 to 1.
+
+        # the in frequencies are from the second to last layer
+        in_freq = self.layers[-2].get_spike_frequencies()
+
+        # Fabricate the desired output. (one hot)
+        labels = labels.to(out_freq.device)
+        truth = torch.nn.functional.one_hot(labels)
+        error = truth - out_freq
+
+        # Zero out error when the classification is correct.
+        predicted_labels = torch.argmax(out_freq, axis=1)
+        error[predicted_labels == labels] = 0
+        
+        # Should we do sum or mean?
+        out_layer.weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
+        out_layer.bias += error.sum(axis=0) * learning_rate
             
-        return error.mean()
+        return (error*error).mean()
 
 
+
+        
 def load_mnist():
     # load MNIST dataset using the torchvision package.
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
@@ -378,31 +367,40 @@ def compute_accuracy(model, test_loader):
                 total += 1
 
     return (100.0 * total_correct/total)
+# 8(5),92(9)
+
+#[0.0625, 0.0000, 0.0625, 0.0625, 0.1875, 0.3125, 0.3125, 0.0000, 0.1875, .1250]
+#[0.0625, 0.0000, 0.0625, 0.0000, 0.1875, 0.2500, 0.3125, 0.0000, 0.1875, 0.1250]
 
 
-def train_spikingnet(model, teacher, train_loader, layer_idx):
-    b = 1
+#[0.0000, 0.0625, 0.0000, 0.0000, 0.2500, 0.0000, 0.0000, 0.1250, 0.0625, 0.2500]
+
+
+def train_spikingnet(model, teacher, train_loader, layer_idx, learning_rate):
+    """ One epoch.  Return total error.
+    """
     # create the reconstructions using the model
+    errors = []
     with torch.no_grad():
         for batch_features in train_loader:
             batch_features = batch_features[0]
             test_examples = batch_features.view(-1, IN_SHAPE)
-            error = model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
-            print("  Batch %d"%b)
-            print("   error: %f"%error)
-            b +=1
+            errors.append(model.forward_learn(test_examples.to(DEVICE),layer_idx,
+                                              teacher, learning_rate))
+    return sum(errors)/len(errors)
 
 
-def train_spiking_lastlayer(model, teacher, train_loader):
-    b = 1
+def train_spiking_lastlayer(model, teacher, train_loader, learning_rate):
+    """ One epoch.  Return total error.
+    """
     # create the reconstructions using the model
+    errors = []
     with torch.no_grad():
         for images, labels in train_loader:
             images = images.view(images.shape[0], -1)
-            error = model.last_layer_learn(images.to(DEVICE),labels,teacher)
-            print("  Batch %d"%b)
-            print("   error: %f"%error)
-            b +=1
+            errors.append(model.last_layer_learn(images.to(DEVICE),labels,
+                                                 learning_rate))
+    return sum(errors)/len(errors)
             
         
 def test_mnist_classifier(show=True):
@@ -444,19 +442,32 @@ def test_mnist_classifier(show=True):
     
 
     ## Tune/train the spiking network
-    for i in range(5):
-        print("Epoch %d"%(i+1))
-        for layer_idx in range(3):
-            print(" Layer %d"%(layer_idx+1))
-            train_spikingnet(spiking_model, model, train_loader, layer_idx)
-            accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
+    error = 100000
+    for layer_idx in range(3):
+        print("Layer %d"%(layer_idx+1))
+        learning_rate = SPIKE_LEARNING_RATE
+        for epoch_idx in range(10):
+            print("  Epoch %d"%(epoch_idx+1))
+            tmp = train_spikingnet(spiking_model, model, test_loader,
+                                   layer_idx, learning_rate)
+            if tmp > error:
+                learning_rate *= 0.5
+            error = tmp
+            print(f"    error = {error}")
+            accuracy_CF_spikes_train = compute_accuracy(spiking_model, train_loader)
             print(accuracy_CF_spikes_train)
             
     print('Last Layer Train')
-    for i in range(5):
-        print("Epoch %d"%(i+1))
-        train_spiking_lastlayer(spiking_model, model, train_loader)
-        accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
+    learning_rate = SPIKE_LEARNING_RATE
+    for epoch_idx in range(10):
+        print("  Epoch %d"%(epoch_idx+1))
+        tmp = train_spiking_lastlayer(spiking_model, model,
+                                      test_loader, learning_rate)
+        if tmp > error:
+            learning_rate *= 0.5
+        error = tmp
+        print(f"    error = {error}")
+        accuracy_CF_spikes_train = compute_accuracy(spiking_model, train_loader)
         print(accuracy_CF_spikes_train)
             
     results['accuracy_CF_spikes_train'] = accuracy_CF_spikes_train

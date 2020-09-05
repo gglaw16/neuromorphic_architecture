@@ -53,15 +53,15 @@ def compare_results_with_truth(results, truth, label=""):
 
     if isinstance(results, (np.ndarray, np.generic)):
         # Do we need an epsilon/fuzzy comparison?
-        if not np.array_equal(truth, results):
+        #if not np.array_equal(truth, results):
+        if not compare_numpy_arrays(results, truth, label):
             print(f"Failed {label}: numpy array mismatch")
-            compare_numpy_arrays(results, truth, label)
             return False
         return True
     
     if isinstance(results, float):
         # Do we need an epsilon/fuzzy comparison?
-        if truth != results:
+        if abs(truth-results) > 0.00005:
             print(f"Failed {label}: float value mismatch, {results} != {truth}")
             return False
         return True
@@ -82,7 +82,8 @@ def compare_numpy_arrays(results, truth, label = ""):
         print(f"{label} type mismatch {results.dtype} != {truth.dtype}") 
         return False
     if len(results.shape) == 0:
-        if results != truth:
+        #if results != truth:
+        if abs(results - truth) > 0.00005:
             print(f"{label} value mismatch {results} != {truth} (truth)") 
             return False
         return True

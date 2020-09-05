@@ -5,6 +5,12 @@ import torch.nn as nn
 #import ipdb
 
 
+# Notes:  I could execute a series of spikes in one forward call,
+# but I want to support batches api like normal forward methods.
+# Should we change output ot int or bool?
+# Smaller memory might allow for batches and trains of spikes.
+# No, we still need to store the potentials.
+
 # Subclasses of torch.nn layers that have extra functionality for spiking.
 
 
@@ -40,7 +46,7 @@ class Encoder(nn.Identity):
             self.potentials = torch.zeros(activations.shape,
                                           device=activations.device)
         if self.spike_counts is None:
-            self.spike_counts = torch.zeros(activations.shape[-1],
+            self.spike_counts = torch.zeros(activations.shape,
                                             device=activations.device)
 
             self.frequency_duration = 0
@@ -49,14 +55,13 @@ class Encoder(nn.Identity):
         # add the input currents to the membrane potentials (capacitence)
         potentials += activations
         # convert the voltage in the cell to spikes
-        output = potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
+        output = torch.zeros(potentials.shape, device=potentials.device)
+        output[potentials > 1] = 1
         # if the neuron spikes, subtract 1 from potentials
         potentials[output > 0] -= 1
 
         # For learning.
-        self.spike_counts += output.sum(axis=0)
+        self.spike_counts += output
         self.frequency_duration += 1
         
         return output
@@ -104,21 +109,18 @@ class Linear(nn.Linear):
         """
 
         # create the voltages in the cell from input spikes (currents)
-        #total = self.state_dict()['weight'].clone().detach()*(input_spikes)
         input_current = self(input_spikes)
         
         # get the potentials for this layer
         if self.potentials is None:
             self.potentials = torch.zeros(input_current.shape, device=input_current.device)
 
-        #self.potentials += torch.sum(input_current,axis=1)
         # Integrate current witn membrane capacitance to get voltage.
         self.potentials += input_current
         
         # convert the voltage in the cell to spikes for output
-        output = self.potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
+        output = torch.zeros(input_current.shape, device=input_current.device)
+        output[self.potentials > 1] = 1
         
         # if neuron has spiked, subtract that from cell voltage
         self.potentials[output == 1] -= 1
@@ -169,10 +171,12 @@ class Linear(nn.Linear):
         self.in_bins = np.copy(source_layer.in_bins)
         self.out_bins = np.copy(source_layer.out_bins)
 
-
-    def reconstruct(self, output_spike_freq):
-        output_spike_counts = output_spike_freq * self.frequency_duration            
-        return output_spike_counts*(self.out_bins[1]-self.out_bins[0])
+    def get_activation(self):
+        """ Get a continuous activation that is equivalaent spiking rate.
+        Uses bins to try and reverse translate firing rate.
+        I do not think the logic is right.
+        """
+        return self.spike_counts*(self.out_bins[1]-self.out_bins[0])
 
 
 

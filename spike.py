@@ -19,7 +19,7 @@ class Encoder(nn.Identity):
     def __init__(self, num_features):
         super().__init__(num_features)        
 
-    def get_spike_frequencies(self):
+    def get_out_spike_frequencies(self):
         return self.spike_counts / self.frequency_duration
 
     def reset(self):
@@ -84,7 +84,8 @@ class Linear(nn.Linear):
         # I am dealying the allocation of the integration tensors until execution.
         # We do not know the shape necessary for these tensors until we know the shape of the input / output.
         self.potentials = None
-        self.spike_counts = None
+        self.in_spike_counts = None
+        self.out_spike_counts = None
         self.frequency_duration = 0
 
 
@@ -126,24 +127,78 @@ class Linear(nn.Linear):
         self.potentials[output == 1] -= 1
         
         # For learning.
-        if self.spike_counts is None:
-            self.spike_counts = torch.zeros(output.shape,
-                                            device=output.device)
-        self.spike_counts += output
+        if self.out_spike_counts is None:
+            self.out_spike_counts = torch.zeros(output.shape,
+                                                device=output.device)
+        if self.in_spike_counts is None:
+            self.in_spike_counts = torch.zeros(input_spikes.shape,
+                                                device=input_spikes.device)
+        self.out_spike_counts += output
+        self.in_spike_counts += input_spikes
         self.frequency_duration += 1
 
         return output 
 
 
-    def get_spike_frequencies(self):
-        return self.spike_counts / self.frequency_duration
+    def learn_spike_frequencies(self, truth_frequencies, learning_rate):
+        """ The layer must execute before this call.
+        truth_frequencies: tensor of floats that are the desired out_spiking_frequenceis.
+        """
+        in_freq = self.get_in_spike_frequencies()
+        out_freq = self.get_out_spike_frequencies()
+        delta = truth_frequencies - out_freq
 
+        # Should we do sum or mean?
+        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
+        self.bias += delta.sum(axis=0) * learning_rate
+        error = (delta * delta).mean()
+        
+        return error
+
+
+    def learn_labels(self, truth_labels, learning_rate):        
+        """ The layer must execute before this call.
+        truth_labels: tensor of integer labels.  
+        desired output is one hot enocding of these labels.
+        """
+        # Get the input frequencies (range 0-1).
+        in_freq = self.get_in_spike_frequencies()
+        # Get the output frequencies (range 0-1).
+        out_freq = self.get_out_spike_frequencies()
+
+        # This should really be done before this method is called.
+        truth_labels = truth_labels.to(out_freq.device)
+
+        # Fabricate the desired one hot output from the labels.
+        truth = torch.nn.functional.one_hot(truth_labels)
+        delta = truth - out_freq
+
+        # Zero out desired chance when the classification is correct.
+        predicted_labels = torch.argmax(out_freq, axis=1)
+        delta[predicted_labels == truth_labels] = 0
+        
+        # Should we do sum or mean?
+        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
+        self.bias += delta.sum(axis=0) * learning_rate
+            
+        error = (delta*delta).mean()
+        return error
+
+
+    def get_in_spike_frequencies(self):
+        return self.in_spike_counts / self.frequency_duration
     
+    
+    def get_out_spike_frequencies(self):
+        return self.out_spike_counts / self.frequency_duration
+
+
     def reset(self):
         """ Reset membrane potential and counts to start computing spikes and frequency a new.
         """
         self.potentials = None
-        self.spike_counts = None
+        self.in_spike_counts = None
+        self.out_spike_counts = None
         self.frequency_duration = 0
 
         
@@ -164,19 +219,19 @@ class Linear(nn.Linear):
         self.in_bins = np.histogram_bin_edges(self.in_memory, bins=bits)
         self.out_bins = np.histogram_bin_edges(self.out_memory, bins=bits)
 
-    def copy(self, source_layer):
-        # Copy weights and biases
-        self.load_state_dict(source_layer.state_dict())
-        # Copy bins
-        self.in_bins = np.copy(source_layer.in_bins)
-        self.out_bins = np.copy(source_layer.out_bins)
+    #def copy(self, source_layer):
+    #    # Copy weights and biases
+    #    self.load_state_dict(source_layer.state_dict())
+    #    # Copy bins
+    #    self.in_bins = np.copy(source_layer.in_bins)
+    #    self.out_bins = np.copy(source_layer.out_bins)
 
     def get_activation(self):
         """ Get a continuous activation that is equivalaent spiking rate.
         Uses bins to try and reverse translate firing rate.
         I do not think the logic is right.
         """
-        return self.spike_counts*(self.out_bins[1]-self.out_bins[0])
+        return self.out_spike_counts*(self.out_bins[1]-self.out_bins[0])
 
 
 

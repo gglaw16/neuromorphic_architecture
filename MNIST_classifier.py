@@ -134,9 +134,9 @@ class CF_spikes(nn.Module):
         uses the the memory in order to create a list of bins for the spiking
         network to use for discretization purposes
         '''
-        for idx in range(len(self.layers)):
-            if idx > 0:
-                self.layers[idx].create_bins(num_bins)
+        # Skip spike encoder layer because this is executing in continuous mode.
+        for layer in self.layers[1:]:
+            layer.create_bins(num_bins)
     
         
     # This can still be simplified and handled mostly by the layers.
@@ -192,57 +192,32 @@ class CF_spikes(nn.Module):
 
     
     def forward_learn(self, features, layer_idx, teacher, learning_rate):
+        # +1 is to skip the spike enocder
+        layer = self.layers[layer_idx+1]
+
         # Get the truth (output activation of the teachers target layer).
         # Execute the teacher using the supplied input batch.
         teacher(features)
-
         # Get the activations for the target layer.
-        og_layer = teacher.activations[layer_idx]
+        layer_truth = teacher.activations[layer_idx]
         # This should scale the activations to 0->1
-        # +1 is to skip the spike enocder
-        og_layer /= self.layers[layer_idx+1].out_bins[-1]
+        layer_truth /= layer.out_bins[-1]
 
-        # reset the potentials to zero
-        self.reset()
+        # Execute the netowrk
         self.forward(features)
 
-        # now we have to use the spike frequencies and og layer outputs to learn 
-        in_freq = self.layers[layer_idx].get_spike_frequencies()    
-        out_freq = self.layers[layer_idx+1].get_spike_frequencies()
-        error = og_layer-out_freq
-
-        # Should we do sum or mean?
-        self.layers[layer_idx+1].weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
-        self.layers[layer_idx+1].bias += error.sum(axis=0) * learning_rate
-
-        return (error*error).mean()
+        # Let the layer learn to generate the truth (instead of its current activation).
+        error = layer.learn_spike_frequencies(layer_truth, learning_rate)
+        return error
     
     
     def last_layer_learn(self, features, labels, learning_rate):
-        # Seems to be returning spike counts
-        out_freq = self.forward(features)
+        # Execute the spiking network
+        self.forward(features)
 
-        # Get activation that ranges fro 0-1
-        out_layer = self.layers[-1]
-        out_freq = out_layer.get_spike_frequencies()
-
-        # the in frequencies are from the second to last layer
-        in_freq = self.layers[-2].get_spike_frequencies()
-
-        # Fabricate the desired output. (one hot)
-        labels = labels.to(out_freq.device)
-        truth = torch.nn.functional.one_hot(labels)
-        error = truth - out_freq
-
-        # Zero out error when the classification is correct.
-        predicted_labels = torch.argmax(out_freq, axis=1)
-        error[predicted_labels == labels] = 0
-        
-        # Should we do sum or mean?
-        out_layer.weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
-        out_layer.bias += error.sum(axis=0) * learning_rate
-            
-        return (error*error).mean()
+        layer = self.layers[-1]
+        error = layer.learn_labels(labels, learning_rate)
+        return error
 
 
 

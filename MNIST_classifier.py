@@ -55,13 +55,13 @@ class CF(nn.Module):
         super().__init__()
 
         self.input_layer = nn.Linear(in_features=kwargs["input_shape"], 
-                                              out_features=HIDDEN_NEURONS[0])
+                                     out_features=HIDDEN_NEURONS[0])
         
         self.hidden_layer = nn.Linear(in_features=HIDDEN_NEURONS[0], 
-                                              out_features=HIDDEN_NEURONS[1])
+                                      out_features=HIDDEN_NEURONS[1])
         
         self.output_layer = nn.Linear(in_features=HIDDEN_NEURONS[1], 
-                                                out_features=kwargs["output_shape"])
+                                      out_features=kwargs["output_shape"])
         
         self.layers = [self.input_layer, self.hidden_layer, self.output_layer]
         
@@ -72,16 +72,18 @@ class CF(nn.Module):
     a method updated from the super class, runs input through all the layers
     '''
     def forward(self, images):
+        self.activations = []
         softmax = nn.LogSoftmax(dim=1)
         lrelu = nn.LeakyReLU()
-        features = torch.relu(self.input_layer(images))
-        features = torch.relu(self.hidden_layer(features))
-        output = softmax(lrelu(self.output_layer(features)))
-
+        features = torch.relu(self.layers[0](images))
+        self.activations.append(features)
+        features = torch.relu(self.layers[1](features))
+        self.activations.append(features)
+        features = lrelu(self.layers[2](features))
+        self.activations.append(features)
+        
+        output = softmax(features)
         return output
-
-
-
 
     
 # classifier spiking network
@@ -159,18 +161,6 @@ class CF_spikes(nn.Module):
         for layer in self.layers:
             layer.translate_weights()
 
-
-    def copy(self, in_model):
-        """ Convert might be a better name.
-        Custom for the classifier, but will be made general in the future.
-        """
-        # source net does not have an encoder_input_layer.
-        self.input_layer.copy(in_model.input_layer)
-        self.hidden_layer.copy(in_model.hidden_layer)
-        self.output_layer.copy(in_model.output_layer)
-
-        self.set_up_weights()
-
         
     def reset(self):
         """
@@ -202,70 +192,39 @@ class CF_spikes(nn.Module):
 
     
     def forward_learn(self, features, layer_idx, teacher, learning_rate):
+        # Get the truth (output activation of the teachers target layer).
+        # Execute the teacher using the supplied input batch.
+        teacher(features)
+
+        # Get the activations for the target layer.
+        og_layer = teacher.activations[layer_idx]
+        # This should scale the activations to 0->1
+        # +1 is to skip the spike enocder
+        og_layer /= self.layers[layer_idx+1].out_bins[-1]
+
         # reset the potentials to zero
         self.reset()
+        self.forward(features)
 
-        # loop through every layer until we've finished processing the spikes
-        # Process the entire batch at the same time.
-        for i in range(DURATION):
-            x = features
-            for layer in self.layers:
-                x = layer.process(x)
-
-        # get the outputs from the original network for our truth
-        og_layers = []
-        lrelu = nn.LeakyReLU()
-        og_layers.append(torch.relu(teacher.input_layer(features)))
-        og_layers.append(torch.relu(teacher.hidden_layer(og_layers[0])))
-        og_layers.append(lrelu(teacher.output_layer(og_layers[1])))
-
-        # change to frequencies by using max bin
-        # Skip the spike enocder layer.  TODO: See if we can generalize.
-        for idx in range(len(og_layers)):
-            og_layers[idx] /= self.layers[idx+1].out_bins[-1]
-            
         # now we have to use the spike frequencies and og layer outputs to learn 
-        in_frequencies = self.layers[layer_idx].get_spike_frequencies()    
-        out_frequencies = self.layers[layer_idx+1].get_spike_frequencies()
-        # +1 is to skip the spike enocder
-            
-        error = og_layers[layer_idx]-out_frequencies
+        in_freq = self.layers[layer_idx].get_spike_frequencies()    
+        out_freq = self.layers[layer_idx+1].get_spike_frequencies()
+        error = og_layer-out_freq
 
         # Should we do sum or mean?
-        self.layers[layer_idx+1].weight += torch.matmul(error.transpose(0,1), in_frequencies) * learning_rate
+        self.layers[layer_idx+1].weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
         self.layers[layer_idx+1].bias += error.sum(axis=0) * learning_rate
 
         return (error*error).mean()
     
     
     def last_layer_learn(self, features, labels, learning_rate):
-        """ many small unimportant changes are overwhelming important error.
-        out_freq = self(features)
         # Seems to be returning spike counts
+        out_freq = self.forward(features)
+
+        # Get activation that ranges fro 0-1
         out_layer = self.layers[-1]
         out_freq = out_layer.get_spike_frequencies()
-        # Now it ranges from 0 to 1.
-
-        # the in frequencies are from the second to last layer
-        in_freq = self.layers[-2].get_spike_frequencies()
-
-        # Fabricate the desired output. (one hot)
-        labels = labels.to(out_freq.device)
-        truth = torch.nn.functional.one_hot(labels)
-        error = truth - out_freq
-
-        # Should we do sum or mean?
-        out_layer.weight += torch.matmul(error.transpose(0,1), in_freq) * learning_rate
-        out_layer.bias += error.sum(axis=0) * learning_rate
-            
-        return (error*error).mean()
-        """
-
-        out_freq = self(features)
-        # Seems to be returning spike counts
-        out_layer = self.layers[-1]
-        out_freq = out_layer.get_spike_frequencies()
-        # Now it ranges from 0 to 1.
 
         # the in frequencies are from the second to last layer
         in_freq = self.layers[-2].get_spike_frequencies()

@@ -72,13 +72,13 @@ class AE(nn.Module):
     a method updated from the super class, runs input through all the layers
     '''
     def forward(self, features):
-        activation = self.encoder_hidden_layer(features) # performs matmul of input and weights
+        activation = self.layers[0](features) # performs matmul of input and weights
         activation = torch.relu(activation) # only output vals >= 0
-        code = self.encoder_output_layer(activation)
+        code = self.layers[1](activation)
         code = torch.relu(code)
-        activation_decoder = self.decoder_hidden_layer(code)
+        activation_decoder = self.layers[2](code)
         activation_decoder = torch.relu(activation_decoder)
-        reconstructed = self.decoder_output_layer(activation_decoder)
+        reconstructed = self.layers[3](activation_decoder)
         reconstructed = torch.relu(reconstructed)
         
         return reconstructed
@@ -122,20 +122,15 @@ class AE_spikes(nn.Module):
         self.layers.append(self.decoder_output_layer)
 
 
-
     def _save_memory(self, in_features):
         """internal method. This executes the network in continuous mode for a single input.
         Activations are recorded so weigths can be normalized for spking execution.
         """
         # Execute the network on this input, and have eachlayer record activations.
-        activation = self.encoder_hidden_layer.save_memory(in_features)
-        activation = torch.relu(activation)
-        code = self.encoder_output_layer.save_memory(activation)
-        code = torch.relu(code)
-        activation_decoder = self.decoder_hidden_layer.save_memory(code)
-        activation_decoder = torch.relu(activation_decoder)
-        reconstructed = self.decoder_output_layer.save_memory(activation_decoder)
-        reconstructed = torch.relu(reconstructed)
+        features = torch.relu(self.layers[1].save_memory(in_features))
+        features = torch.relu(self.layers[2].save_memory(features))
+        features = torch.relu(self.layer2[3].save_memory(features))
+        output = torch.relu(self.layers[4].save_memory(features))
 
 
     def _create_bins(self, num_bins):
@@ -143,10 +138,10 @@ class AE_spikes(nn.Module):
         uses the the memory in order to create a list of bins for the spiking
         network to use for discretization purposes
         '''
-        self.encoder_hidden_layer.create_bins(num_bins)
-        self.encoder_output_layer.create_bins(num_bins)
-        self.decoder_hidden_layer.create_bins(num_bins)
-        self.decoder_output_layer.create_bins(num_bins)
+        self.layers[1].create_bins(num_bins)
+        self.layers[2].create_bins(num_bins)
+        self.layers[3].create_bins(num_bins)
+        self.layers[4].create_bins(num_bins)
     
         
     # This can still be simplified and handled mostly by the layers.
@@ -172,19 +167,6 @@ class AE_spikes(nn.Module):
             layer.translate_weights()
 
 
-    def copy(self, in_model):
-        """ Convert might be a better name.
-        Custom for the autoencoder, but will be made general in the future.
-        """
-        # source net does not have an encoder_input_layer.
-        self.encoder_hidden_layer.copy(in_model.encoder_hidden_layer)
-        self.encoder_output_layer.copy(in_model.encoder_output_layer)
-        self.decoder_hidden_layer.copy(in_model.decoder_hidden_layer)
-        self.decoder_output_layer.copy(in_model.decoder_output_layer)
-
-        self.set_up_weights()
-
-        
     def reset(self):
         """
         resets the potentials to zero so that a new image can be processed
@@ -203,17 +185,14 @@ class AE_spikes(nn.Module):
             # reset the potentials to zero
             self.reset()
 
-            output_spike_counts = torch.zeros(IN_SHAPE).to(DEVICE)
-            
             # loop through every layer until we've finished processing the spikes
             for i in range(DURATION):
                 x = feature
                 for layer in self.layers:
                     x = layer.process(x)
-                output_spike_counts += x
 
             # convert the output spikes to voltages
-            reconstructed = self.layers[-1].reconstruct(output_spike_counts / float(DURATION))
+            reconstructed = self.layers[-1].get_activation()
             # add the reconstructed image to the list
             reconstructions.append(reconstructed)
             
@@ -237,10 +216,10 @@ class AE_spikes(nn.Module):
 
             # get the outputs from the original network for our truth
             og_layers = []
-            og_layers.append(torch.relu(teacher.encoder_hidden_layer(feature)))
-            og_layers.append(torch.relu(teacher.encoder_output_layer(og_layers[0])))
-            og_layers.append(torch.relu(teacher.decoder_hidden_layer(og_layers[1])))
-            og_layers.append(torch.relu(teacher.decoder_output_layer(og_layers[2])))
+            og_layers.append(torch.relu(teacher.layers[0](feature)))
+            og_layers.append(torch.relu(teacher.layers[1](og_layers[0])))
+            og_layers.append(torch.relu(teacher.layers[2](og_layers[1])))
+            og_layers.append(torch.relu(teacher.layers[3](og_layers[2])))
 
             # change to frequencies by using max bin
             # Skip the spike enocder layer.  TODO: See if we can generalize.
@@ -280,12 +259,10 @@ class AE_spikes(nn.Module):
         for feature in features:
             # reset the potentials to zero
             self.reset()
-            # divide input into 16 (duration)
-            input_activation = self.encoder_hidden_layer.discretize(feature)/float(DURATION)
 
             # loop through every layer until we've finished processing the spikes
             for i in range(DURATION):
-                x = input_activation
+                x = feature
                 for layer in self.layers:
                     x = layer.process(x)
 
@@ -448,7 +425,7 @@ def compute_mMSE(model, test_loader):
         return np.mean(np.array(mMSE))
 
 
-def train_spikingnet(model, teacher, train_loader, layer_idx):
+def train_spikingnet(model, teacher, train_loader, layer_idx, bmax=None):
     test_examples = None
     b = 1
     # create the reconstructions using the model
@@ -459,10 +436,12 @@ def train_spikingnet(model, teacher, train_loader, layer_idx):
             error = model.forward_learn(test_examples.to(DEVICE),layer_idx, teacher)
             print("  Batch %d"%b)
             print("   error: %f"%error)
+            if bmax != None and b >= bmax:
+                return
             b +=1
             
 
-def train_spiking_lastlayer(model, teacher, train_loader):
+def train_spiking_lastlayer(model, teacher, train_loader, bmax=None):
     test_examples = None
     b = 1
     # create the reconstructions using the model
@@ -473,6 +452,8 @@ def train_spiking_lastlayer(model, teacher, train_loader):
             error = model.last_layer_learn(test_examples.to(DEVICE), teacher)
             print("  Batch %d"%b)
             print("   error: %f"%error)
+            if bmax != None and b >= bmax:
+                return
             b +=1
 
 
@@ -538,19 +519,19 @@ def test_mnist_autoencoder(show=True):
     results['spiking_reconstruction'] = reconstruct_test_images(spiking_model, test_loader, show)
 
     ## Tune/train the spiking network
-    for i in range(5):
+    for i in range(1):
         print("Epoch %d"%(i+1))
         for layer_idx in range(4):
             print(" Layer %d"%(layer_idx+1))
-            train_spikingnet(spiking_model, model, train_loader, layer_idx)
+            train_spikingnet(spiking_model, model, train_loader, layer_idx, bmax=4)
             mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader)
             print(mMSE_AE_spikes_train)
             
     print('Last Layer Train')
-    for i in range(5):
+    for i in range(1):
         print("Epoch %d"%(i+1))
         train_spiking_lastlayer(spiking_model, model, train_loader)
-        mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader)
+        mMSE_AE_spikes_train = compute_mMSE(spiking_model, test_loader, bmax=4)
         print(mMSE_AE_spikes_train)
             
     results['mMSE_AE_spikes_train'] = mMSE_AE_spikes_train

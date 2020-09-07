@@ -150,7 +150,7 @@ class Linear(nn.Linear):
 
         # Should we do sum or mean?
         self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
-        self.bias += delta.sum(axis=0) * learning_rate
+        self.bias += delta.sum(axis=0) * learning_rate/16.0
         error = (delta * delta).mean()
         
         return error
@@ -159,15 +159,12 @@ class Linear(nn.Linear):
     def learn_labels(self, truth_labels, learning_rate):        
         """ The layer must execute before this call.
         truth_labels: tensor of integer labels.  
-        desired output is one hot enocding of these labels.
+        desired output is one hot encoding of these labels.
         """
         # Get the input frequencies (range 0-1).
         in_freq = self.get_in_spike_frequencies()
         # Get the output frequencies (range 0-1).
         out_freq = self.get_out_spike_frequencies()
-
-        # This should really be done before this method is called.
-        truth_labels = truth_labels.to(out_freq.device)
 
         # Fabricate the desired one hot output from the labels.
         truth = torch.nn.functional.one_hot(truth_labels)
@@ -179,7 +176,7 @@ class Linear(nn.Linear):
         
         # Should we do sum or mean?
         self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
-        self.bias += delta.sum(axis=0) * learning_rate
+        self.bias += delta.sum(axis=0) * learning_rate/16.0
             
         error = (delta*delta).mean()
         return error
@@ -288,10 +285,9 @@ class Conv2d(nn.Conv2d):
         if self.potentials is None:
             self.potentials = torch.zeros(total.shape,
                                           device=total.device)
-            # Broadcast the biases to initializ the potential
-            self.potentials = self.potentials + self.spike_bias 
 
-        self.potentials += torch.sum(total,axis=1)
+
+        self.potentials += total
         
         # convert the voltage in the cell to spikes for output
         output = self.potentials.clone().detach()
@@ -308,7 +304,7 @@ class Conv2d(nn.Conv2d):
         self.spike_counts += output
         self.frequency_duration += 1
 
-        return output 
+        return output.view(output.shape[0], -1) 
 
 
     def get_spike_frequencies(self):

@@ -19,7 +19,7 @@ import torchvision
 import spike
 import testspike
 
-import ipdb
+#import ipdb
 
 # set our seed and other configurations for reproducibility
 SEED = 42
@@ -37,7 +37,7 @@ OUT_SHAPE = 10
 
 DURATION = 16
 
-SPIKE_LEARNING_RATE = 1e-3
+SPIKE_LEARNING_RATE = 1e-4
 
 
 # use gpu if available
@@ -332,7 +332,7 @@ def train_spiking_lastlayer(model, teacher, train_loader, learning_rate):
     with torch.no_grad():
         for images, labels in train_loader:
             images = images.view(images.shape[0], -1)
-            errors.append(model.last_layer_learn(images.to(DEVICE),labels,
+            errors.append(model.last_layer_learn(images.to(DEVICE),labels.to(DEVICE),
                                                  learning_rate))
     return sum(errors)/len(errors)
             

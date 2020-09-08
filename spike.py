@@ -172,7 +172,7 @@ class Linear(nn.Linear):
         predicted_labels = torch.argmax(out_freq, axis=1)
         delta[predicted_labels == truth_labels] = 0
 
-        # hack, this stage is less stable.
+        # hack, this stage is less stable.1: job postus citizenship Alsodal
         learning_rate *= 0.1
         
         # Should we do sum or mean?

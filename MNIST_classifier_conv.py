@@ -39,7 +39,7 @@ DURATION = 16
 
 SPIKE_LEARNING_RATE = 1e-3
 
-SPIKING_EPOCHS = 2
+SPIKING_EPOCHS = 10
 
 
 # use gpu if available
@@ -192,6 +192,8 @@ class CF_spikes(nn.Module):
 
     
     def forward_learn(self, features, layer_idx, teacher, learning_rate):
+        """ Trains a single layer specified by layer_idx.
+        """
         # +1 is to skip the spike enocder
         layer = self.layers[layer_idx+1]
 
@@ -209,6 +211,27 @@ class CF_spikes(nn.Module):
         # Let the layer learn to generate the truth (instead of its current activation).
         error = layer.learn_spike_frequencies(layer_truth, learning_rate)
         return error
+    
+    
+    def forward_learn2(self, features, teacher, learning_rate):
+        """ Trains all layers at ther same time.
+        """
+        # Execute the teacher using the supplied input batch.
+        teacher(features)
+        # Execute the netowrk
+        self.forward(features)
+
+        # +1 is to skip the spike enocder
+        errors = []
+        for layer_idx, layer in enumerate(self.layers[1:]):
+            # Get the truth (output activation of the teachers target layer).
+            layer_truth = teacher.activations[layer_idx]
+            # This should scale the activations to 0->1
+            layer_truth /= layer.out_bins[-1]
+
+            # Let the layer learn to generate the truth (instead of its current activation).
+            errors.append(layer.learn_spike_frequencies(layer_truth, learning_rate))
+        return sum(errors) / len(errors)
     
     
     def last_layer_learn(self, features, labels, learning_rate):
@@ -311,6 +334,7 @@ def compute_accuracy(model, test_loader):
 
 def train_spikingnet(model, teacher, train_loader, layer_idx, learning_rate):
     """ One epoch.  Return total error.
+    Trains only one layer specified by layer_idx.
     """
     # create the reconstructions using the model
     errors = []
@@ -318,6 +342,20 @@ def train_spikingnet(model, teacher, train_loader, layer_idx, learning_rate):
         for batch_features in train_loader:
             test_examples = batch_features[0]
             errors.append(model.forward_learn(test_examples.to(DEVICE),layer_idx,
+                                              teacher, learning_rate))
+    return sum(errors)/len(errors)
+
+
+def train_spikingnet2(model, teacher, train_loader, learning_rate):
+    """ One epoch.  Return total error.
+    Trains all the layers atthe same time.
+    """
+    # create the reconstructions using the model
+    errors = []
+    with torch.no_grad():
+        for batch_features in train_loader:
+            test_examples = batch_features[0]
+            errors.append(model.forward_learn2(test_examples.to(DEVICE),
                                               teacher, learning_rate))
     return sum(errors)/len(errors)
 
@@ -375,19 +413,17 @@ def test_mnist_classifier(show=True):
 
     ## Tune/train the spiking network
     error = 100000
-    for layer_idx in range(3):
-        print("Layer %d"%(layer_idx+1))
-        learning_rate = SPIKE_LEARNING_RATE
-        for epoch_idx in range(SPIKING_EPOCHS):
-            print("  Epoch %d"%(epoch_idx+1))
-            tmp = train_spikingnet(spiking_model, model, train_loader,
-                                   layer_idx, learning_rate)
-            if tmp > error:
-                learning_rate *= 0.5
-            error = tmp
-            print(f"    error = {error}")
-            accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
-            print(accuracy_CF_spikes_train)
+    learning_rate = SPIKE_LEARNING_RATE
+    for epoch_idx in range(SPIKING_EPOCHS):
+        print("  Epoch %d"%(epoch_idx+1))
+        tmp = train_spikingnet2(spiking_model, model,
+                                train_loader, learning_rate)
+        if tmp > error:
+            learning_rate *= 0.5
+        error = tmp
+        print(f"    error = {error}")
+        accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
+        print(accuracy_CF_spikes_train)
             
     print('Last Layer Train')
     learning_rate = SPIKE_LEARNING_RATE

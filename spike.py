@@ -178,8 +178,8 @@ class Linear(nn.Linear):
         # Should we do sum or mean?
         # Lets try mean
         batch_length = delta.shape[0]
-        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * (learning_rate/batch_length)
-        self.bias += delta.mean(axis=0) * learning_rate
+        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
+        self.bias += delta.sum(axis=0) * (learning_rate/16)
         error = (delta*delta).mean()
         return error
 

@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-#import ipdb
+import ipdb
 
 
 # Notes:  I could execute a series of spikes in one forward call,
@@ -48,7 +48,6 @@ class Encoder(nn.Identity):
         if self.spike_counts is None:
             self.spike_counts = torch.zeros(activations.shape,
                                             device=activations.device)
-
             self.frequency_duration = 0
 
         potentials = self.potentials
@@ -108,7 +107,6 @@ class Linear(nn.Linear):
     def process(self, input_spikes):
         """ Uses a list of input spikes to calculate the output values of a layer.
         """
-
         # create the voltages in the cell from input spikes (currents)
         input_current = self(input_spikes)
         
@@ -148,11 +146,11 @@ class Linear(nn.Linear):
         out_freq = self.get_out_spike_frequencies()
         delta = truth_frequencies - out_freq
 
-        # Should we do sum or mean?
-        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
-        self.bias += delta.sum(axis=0) * learning_rate/16.0
+        # Lets try mean
+        batch_length = delta.shape[0]
+        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * (learning_rate/batch_length)
+        self.bias += delta.mean(axis=0) * learning_rate
         error = (delta * delta).mean()
-        
         return error
 
 
@@ -173,11 +171,15 @@ class Linear(nn.Linear):
         # Zero out desired chance when the classification is correct.
         predicted_labels = torch.argmax(out_freq, axis=1)
         delta[predicted_labels == truth_labels] = 0
+
+        # hack, this stage is less stable.
+        learning_rate *= 0.1
         
         # Should we do sum or mean?
-        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * learning_rate
-        self.bias += delta.sum(axis=0) * learning_rate/16.0
-            
+        # Lets try mean
+        batch_length = delta.shape[0]
+        self.weight += torch.matmul(delta.transpose(0,1), in_freq) * (learning_rate/batch_length)
+        self.bias += delta.mean(axis=0) * learning_rate
         error = (delta*delta).mean()
         return error
 
@@ -253,7 +255,8 @@ class Conv2d(nn.Conv2d):
         # I am dealying the allocation of the integration tensors until execution.
         # We do not know the shape necessary for these tensors until we know the shape of the input / output.
         self.potentials = None
-        self.spike_counts = None
+        self.in_spike_counts = None
+        self.out_spike_counts = None
         self.frequency_duration = 0
 
 
@@ -262,60 +265,96 @@ class Conv2d(nn.Conv2d):
         spike_height = self.in_bins[1]-self.in_bins[0]
         # multiply that into the weights
         self.state_dict()['weight'] *= spike_height
-        layer_bias = self.state_dict()['bias']
-        self.spike_bias = layer_bias * spike_height
-        layer_bias.fill_(0.0)
-        
+        self.state_dict()['bias'] *= spike_height
+            
         # now do the same except for the output spike height
         spike_height = self.out_bins[1]-self.out_bins[0]
         # divide that into the weights
         self.state_dict()['weight'] /= spike_height
-        self.spike_bias /= spike_height
-        
+        self.state_dict()['bias'] /= spike_height
+        self.state_dict()['bias'] /= 16.0
+
         
     # TODO: Overwrite superclass execute layer method
     def process(self, input_spikes):
         """ Uses input spikes to calculate the output values of a layer.
         """
-
         # create the voltages in the cell from input spikes (currents)
-        total = self(input_spikes)
-
-        # Initialize if necessary
+        input_current = self(input_spikes)
+        
+        # get the potentials for this layer
         if self.potentials is None:
-            self.potentials = torch.zeros(total.shape,
-                                          device=total.device)
+            self.potentials = torch.zeros(input_current.shape, device=input_current.device)
 
-
-        self.potentials += total
+        # Integrate current witn membrane capacitance to get voltage.
+        self.potentials += input_current
         
         # convert the voltage in the cell to spikes for output
-        output = self.potentials.clone().detach()
-        output[output > 1] = 1
-        output[output < 1] = 0
+        output = torch.zeros(input_current.shape, device=input_current.device)
+        output[self.potentials > 1] = 1
         
         # if neuron has spiked, subtract that from cell voltage
         self.potentials[output == 1] -= 1
         
         # For learning.
-        if self.spike_counts is None:
-            self.spike_counts = torch.zeros(output.shape,
-                                            device=output.device)
-        self.spike_counts += output
+        if self.out_spike_counts is None:
+            self.out_spike_counts = torch.zeros(output.shape,
+                                                device=output.device)
+        if self.in_spike_counts is None:
+            self.in_spike_counts = torch.zeros(input_spikes.shape,
+                                                device=input_spikes.device)
+        self.out_spike_counts += output
+        self.in_spike_counts += input_spikes
         self.frequency_duration += 1
 
         return output.view(output.shape[0], -1) 
 
 
-    def get_spike_frequencies(self):
-        return self.spike_counts / self.frequency_duration
+    def learn_spike_frequencies(self, truth_frequencies, learning_rate):
+        """ The layer must execute before this call.
+        truth_frequencies: tensor of floats that are the desired out_spiking_frequenceis.
+        """
+        in_freq = self.get_in_spike_frequencies()
+        out_freq = self.get_out_spike_frequencies()
+        delta = truth_frequencies - out_freq
+        kx = self.weight.shape[3]
+        ky = self.weight.shape[2]
 
+        # How many inputs constribute to each output (for scaling learning rate).
+        # +1 for the bias
+        fan_in = in_freq.shape[0] * ((in_freq.shape[1] * kx * ky) + 1)
+        
+        ox = delta.shape[3]
+        oy = delta.shape[2]
+        ch_in = self.weight.shape[1]
+        ch_out = self.weight.shape[0]
+        delta = delta.permute(1,0,2,3).reshape(ch_out, -1)
+        for x in range(kx):
+            for y in range(ky):
+                w_in_freq = in_freq[:, :, y:y+oy, x:x+ox] 
+                w_in_freq = w_in_freq.permute(0, 2, 3, 1).reshape(-1,ch_in)
+                dw = torch.matmul(delta, w_in_freq) 
+                self.weight[..., y, x] += dw * (learning_rate / fan_in)
+
+        self.bias += delta.sum(axis=-1) * (0.5 * learning_rate / fan_in)
+        error = (delta * delta).mean()
+        return error
+
+
+    def get_in_spike_frequencies(self):
+        return self.in_spike_counts / self.frequency_duration
     
+    
+    def get_out_spike_frequencies(self):
+        return self.out_spike_counts / self.frequency_duration
+
+
     def reset(self):
         """ Reset membrane potential and counts to start computing spikes and frequency a new.
         """
         self.potentials = None
-        self.spike_counts = None
+        self.in_spike_counts = None
+        self.out_spike_counts = None
         self.frequency_duration = 0
 
         
@@ -340,18 +379,18 @@ class Conv2d(nn.Conv2d):
 
 
     # TODO: Try to get rid of this method.
-    def discretize(self, values):
-        """
-        uses the bins input in the init to change input values to a discrete number
-        of spikes, uses idx to figure out which list of bins to use
-        """
-        spikes = np.digitize(values.cpu(), self.in_bins)-1
-        return torch.from_numpy(spikes).to(values.device)
+    #def discretize(self, values):
+    #    """
+    #    uses the bins input in the init to change input values to a discrete number
+    #    of spikes, uses idx to figure out which list of bins to use
+    #    """
+    #    spikes = np.digitize(values.cpu(), self.in_bins)-1
+    #    return torch.from_numpy(spikes).to(values.device)
 
     
-    def reconstruct(self, spike_frequencies):
-        spike_counts = spike_frequencies * self.frequency_duration
-        return spike_counts*(self.out_bins[1]-self.out_bins[0])
+    #def reconstruct(self, spike_frequencies):
+    #    spike_counts = spike_frequencies * self.frequency_duration
+    #    return spike_counts*(self.out_bins[1]-self.out_bins[0])
 
         
         

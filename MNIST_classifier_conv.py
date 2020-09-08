@@ -29,7 +29,7 @@ torch.backends.cudnn.deterministic = True
 # set the batch size, the number of training epochs, and the learning rate
 BATCH_SIZE = 512
 EPOCHS = 50
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-5
 HIDDEN_NEURONS = 128
 
 IN_SHAPE = 784
@@ -39,10 +39,11 @@ DURATION = 16
 
 SPIKE_LEARNING_RATE = 1e-3
 
+SPIKING_EPOCHS = 2
+
 
 # use gpu if available
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
 
 
 # classifier class with fully connected layers for both encoder and decoder
@@ -328,7 +329,8 @@ def train_spiking_lastlayer(model, teacher, train_loader, learning_rate):
     errors = []
     with torch.no_grad():
         for images, labels in train_loader:
-            errors.append(model.last_layer_learn(images.to(DEVICE),labels,
+            errors.append(model.last_layer_learn(images.to(DEVICE),
+                                                 labels.to(DEVICE),
                                                  learning_rate))
     return sum(errors)/len(errors)
             
@@ -376,28 +378,28 @@ def test_mnist_classifier(show=True):
     for layer_idx in range(3):
         print("Layer %d"%(layer_idx+1))
         learning_rate = SPIKE_LEARNING_RATE
-        for epoch_idx in range(10):
+        for epoch_idx in range(SPIKING_EPOCHS):
             print("  Epoch %d"%(epoch_idx+1))
-            tmp = train_spikingnet(spiking_model, model, test_loader,
+            tmp = train_spikingnet(spiking_model, model, train_loader,
                                    layer_idx, learning_rate)
             if tmp > error:
                 learning_rate *= 0.5
             error = tmp
             print(f"    error = {error}")
-            accuracy_CF_spikes_train = compute_accuracy(spiking_model, train_loader)
+            accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
             print(accuracy_CF_spikes_train)
             
     print('Last Layer Train')
     learning_rate = SPIKE_LEARNING_RATE
-    for epoch_idx in range(10):
+    for epoch_idx in range(SPIKING_EPOCHS):
         print("  Epoch %d"%(epoch_idx+1))
         tmp = train_spiking_lastlayer(spiking_model, model,
-                                      test_loader, learning_rate)
+                                      train_loader, learning_rate)
         if tmp > error:
             learning_rate *= 0.5
         error = tmp
         print(f"    error = {error}")
-        accuracy_CF_spikes_train = compute_accuracy(spiking_model, train_loader)
+        accuracy_CF_spikes_train = compute_accuracy(spiking_model, test_loader)
         print(accuracy_CF_spikes_train)
             
     results['accuracy_CF_spikes_train'] = accuracy_CF_spikes_train
